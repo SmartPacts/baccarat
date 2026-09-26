@@ -1,7 +1,7 @@
 # Baccarat — how it works, and everything that can go wrong
 
 Every number in this document that states a rule of the contract is checked against it by
-`.github/scripts/baccarat-gates.sh`; if the contract changes and this page does not, the gate
+`.github/scripts/check-player-terms.sh`; if the contract changes and this page does not, the gate
 fails. The per-shoe figures, drand's cadence and the growth estimate are measurements, said so
 where they appear. The behaviours described here are pinned by named tests on the contract's own page, which
 marks the few not yet pinned.
