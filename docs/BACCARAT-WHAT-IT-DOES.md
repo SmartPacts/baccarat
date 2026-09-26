@@ -324,7 +324,6 @@ are listed so this page accounts for every function in the contract, with nothin
 ## What is not built, or not true today
 
 - ⛔ **A locked contract.**
-- ⛔ **The play page for this table.**
 
 ---
 
