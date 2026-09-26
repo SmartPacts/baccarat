@@ -1,0 +1,156 @@
+;; baccarat-payout-testing.repl — paying a whole round's winners at once.
+;;
+;; The house's helper pays winners. At scale a round can hold hundreds of
+;; boards, so the helper must be able to pay many winners in ONE transaction:
+;; each claim installs its own coin.TRANSFER for a DIFFERENT receiver, and Pact's
+;; managed-cap identity is (sender, receiver), so distinct receivers never
+;; collide. Pinned here so the batching the bot relies on is a contract property,
+;; not a belief. Also pinned: the two ways a batch aborts as a whole, which is
+;; why the bot dry-runs every claim before it puts it in a batch.
+
+(load "baccarat-test-init.repl")
+
+(env-chain-data { "block-time": (time "2026-09-20T17:42:13Z") })
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.initialize n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT 100000.0)
+(commit-tx)
+(env-sigs [{"key":"h0u5e00000000000000000000000000000000000000000000000000000000004"
+           ,"caps":[(coin.TRANSFER "house-funder" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 500000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.fund-house "house-funder" 500000.0)
+(commit-tx)
+
+;; forty players on Player, one on Banker. Round 1's coup on beacon 20801767,
+;; dealt from a fresh shoe, is punto (measured).
+(env-enable-repl-natives true)
+(begin-tx)
+(module pay PG (defcap PG () (enforce true "ok"))
+  (defconst SIG "0d745db068db9e16379a49f65d76353d721d79fb459d20b33a50e750e5cdb10400af36e03d4a8414b3a86770d1d1e90e85462dce40b3cf5c27f9fdb477b6f6e0")
+  (defun acct:string (i:integer) (format "player-{}" [i]))
+  (defun place:string (i:integer w:object)
+    (let ((a (acct i)))
+      (env-sigs [{"key":"p00000000000000000000000000000000000000000000000000000000000000p"
+                 ,"caps":[(coin.TRANSFER a (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 10.0)]}])
+      (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet a w))))
+(commit-tx)
+(env-data { "pk": { "keys": ["p00000000000000000000000000000000000000000000000000000000000000p"], "pred": "keys-all" } })
+(begin-tx)
+(test-capability (coin.COINBASE))
+(map (lambda (i:integer) (coin.coinbase (pay.acct i) (read-keyset "pk") 100.0)) (enumerate 1 41))
+(commit-tx)
+(begin-tx)
+(map (lambda (i:integer) (pay.place i {"punto":1.0,"banco":0.0,"tie": 0.0, "commission": 1.0 })) (enumerate 1 40))
+(pay.place 41 {"punto":0.0,"banco":1.0,"tie": 0.0, "commission": 1.0 })
+(expect "PAY-0 PRECONDITION forty-one boards sit in round 1" 41
+  (length (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.round-boards 1)))
+(commit-tx)
+(env-sigs [])
+
+(env-chain-data { "block-time": (time "2026-09-20T17:47:00Z") })
+(begin-tx)
+(expect "PAY-0a the coup is punto" "punto"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.resolve 1 pay.SIG))
+(commit-tx)
+
+;; ============================================================================
+;; PAY-1  A BATCH THAT CONTAINS ONE LOSER ABORTS AS A WHOLE
+;;   This is why the helper dry-runs every claim before batching it. Mutating
+;;   expect-failure, so the block ends in rollback-tx.
+;; ============================================================================
+(begin-tx)
+(expect-failure "PAY-1 forty winners plus the loser: the whole transaction fails"
+  "nothing to claim: this board did not win"
+  (map (lambda (i:integer) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.claim 1 (pay.acct i))) (enumerate 1 41)))
+(rollback-tx)
+;; the state PAY-2 and PAY-3 start from: the first forty claims left nothing behind
+(begin-tx)
+(expect "PAY-1a the aborted batch left nothing behind: nobody has been paid" 80.0
+  (at 'liability (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 1)))
+(expect "PAY-1b and the first winner in that batch still holds only what is left after the stake" 99.0
+  (coin.get-balance (pay.acct 1)))
+(commit-tx)
+
+;; ============================================================================
+;; PAY-2  THE SAME ACCOUNT TWICE IN ONE BATCH ABORTS AS A WHOLE
+;; ============================================================================
+(begin-tx)
+(expect-failure "PAY-2 a winner listed twice fails on the second claim"
+  "this board has already been claimed"
+  (map (lambda (i:integer) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.claim 1 (pay.acct i))) [1 2 1]))
+(rollback-tx)
+
+;; ============================================================================
+;; PAY-3  FORTY DIFFERENT WINNERS ARE PAID IN ONE TRANSACTION
+;;   The bound is the transaction limit itself, 150,000: the batch has to fit.
+;; ============================================================================
+(env-gasmodel "table") (env-gaslimit 150000)
+(begin-tx)
+(expect "PAY-3 PRECONDITION nothing has been paid yet: forty boards at 2.0 each" 80.0
+  (at 'liability (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 1)))
+(env-gas 0)
+(map (lambda (i:integer) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.claim 1 (pay.acct i))) (enumerate 1 40))
+(print (format "GAS 40 claims to 40 accounts in one transaction: {}" [(env-gas)]))
+(expect "PAY-3a forty claims in one transaction fit inside the 150,000 transaction limit" true
+  (< (env-gas) 150000))
+(expect "PAY-3b every winner was paid: the round owes nothing" 0.0
+  (at 'liability (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 1)))
+(expect "PAY-3c a winner holds their stake back plus the 1:1 win" 101.0
+  (coin.get-balance (pay.acct 7)))
+;; COVER THE SET: every one of the forty, not a sample
+(expect "PAY-3c1 all forty winners hold exactly 101.0" 40
+  (length (filter (= 101.0) (map (lambda (i:integer) (coin.get-balance (pay.acct i))) (enumerate 1 40)))))
+(expect "PAY-3d and the loser was not touched" 99.0
+  (coin.get-balance (pay.acct 41)))
+(expect "PAY-3d1 and the loser's board is not marked claimed" false
+  (at 'claimed (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-board 1 (pay.acct 41))))
+(expect "PAY-3e every paid board reads claimed" 40
+  (length (filter (lambda (b:object{n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.board}) (at 'claimed b))
+                  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.round-boards 1))))
+(expect "PAY-3f and the pot's reserve for the round is back to zero" 0.0
+  (at 'reserved (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+(commit-tx)
+
+;; ============================================================================
+;; PAY-4  A ROUND AT A COMMISSION OTHER THAN LAUNCH
+;;   The fee and a Banker win are both priced at the ROUND's commission, never
+;;   the launch constant -- at 5 % the two are indistinguishable, so this round
+;;   runs at 10 %. The loser of round 1 opens round 2 on Banker; beacon 20802058
+;;   deals banco from this pool (measured).
+;; ============================================================================
+(env-chain-data { "block-time": (time "2026-09-20T17:56:46Z") })
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.set-params 0.02 0.01 100000.0 120.0 120.0 0.1 52)
+(commit-tx)
+(begin-tx)
+(expect "PAY-4 PRECONDITION the pot is at its target, so the fee runs at the full edge" 1.0
+  (at 'fee-scale-now (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)))
+(expect "PAY-4p PRECONDITION the Banker edge at 10% is not the edge at 5%" false
+  (= (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.banco-edge 0.1) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.banco-edge 0.05)))
+(pay.place 41 { "punto": 0.0, "banco": 10.0, "tie": 0.0, "commission": 0.1 })
+(let ((r (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 2)))
+  (expect "PAY-4a round 2 opened at 10%" 0.1 (at 'commission-at-open r))
+  (expect "PAY-4b its fee is the Banker edge AT 10% times the stake: floor(banco-edge(0.1) x 10, 12)"
+    (floor (* 10.0 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.banco-edge 0.1)) 12) (at 'fee-owed r))
+  (expect "PAY-4b1 which is 0.33508928974" 0.33508928974 (at 'fee-owed r))
+  (expect "PAY-4b2 CONTROL and not the 0.10579057842 the launch commission would charge" false
+    (= (at 'fee-owed r) (floor (* 10.0 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.banco-edge 0.05)) 12)))
+  (expect "PAY-4c the Banker slot exposes 10 back plus floor(10 x 0.9)" 19.0 (at 1 (at 'exposure r))))
+(commit-tx)
+(env-sigs [])
+(env-chain-data { "block-time": (time "2026-09-20T18:01:00Z") })
+(begin-tx)
+(let ((rev0 (coin.get-balance n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT)))
+  (expect "PAY-4d beacon 20802058 deals a Banker win from this pool" "banco"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.resolve 2 "19d1a6c9bf554b87d004b73acccad64cc0b4370735b609369f92a9a53e8a07870651464a0b393ef8c607ff05eab5dd7b870ff5dfafda7140e0e2ed10387d3160"))
+  (expect "PAY-4e the fee that reached the revenue account is the 10% fee, not the 5% one" 0.33508928974
+    (- (coin.get-balance n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT) rev0)))
+(expect "PAY-4f the Banker board is paid at the round's 10%: 10 back plus 9" "paid 19.000000000000"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.claim 2 (pay.acct 41)))
+(expect "PAY-4f1 CONTROL the account holds 99 - 10 + 19, not the 108.5 a 5% payout would leave" 108.0
+  (coin.get-balance (pay.acct 41)))
+(expect "PAY-4g the round owes nothing" 0.0 (at 'liability (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 2)))
+(commit-tx)
+
+(print "baccarat payout suite complete: a round's winners are paid in one transaction")

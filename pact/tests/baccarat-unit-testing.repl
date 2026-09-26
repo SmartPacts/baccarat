@@ -1,0 +1,1284 @@
+;; baccarat-unit-testing.repl — the drand-dealt, public-shoe baccarat.
+;;
+;; Every coup here is dealt from a REAL drand beacon: the clock is set so the
+;; module pins drand rounds 20801767 (round 1) and 20802058 (round 2), and the
+;; signatures below are the genuine ones for those rounds, used unmodified,
+;; exactly as the drand API returned them. On a fresh shoe round 1
+;; deals Punto 3H 4C against Banco QC 10C 3S and Punto wins; round 2, dealt from
+;; the 411 cards left, goes to Banco.
+
+(load "baccarat-test-init.repl")
+
+(begin-tx)
+(module btest GG (defcap GG () (enforce true "ok"))
+  (defconst ALICE "k:a11ce00000000000000000000000000000000000000000000000000000000001")
+  (defconst BOB   "k:b0b0000000000000000000000000000000000000000000000000000000000002")
+  (defconst CAROL "k:ca40100000000000000000000000000000000000000000000000000000000003")
+  ;; drand evmnet round 20801767, fetched from api.drand.sh
+  (defconst SIG "0d745db068db9e16379a49f65d76353d721d79fb459d20b33a50e750e5cdb10400af36e03d4a8414b3a86770d1d1e90e85462dce40b3cf5c27f9fdb477b6f6e0")
+  ;; drand evmnet round 20801768: genuine, but for the NEXT beacon
+  (defconst SIG-NEXT "3046d0014da5e70c6a4c99fc5fafde0cc68ae79d82ece3177dc7d6147945cfb502d3ce355c42c98368f003bf089aebb110ee7119f62d6402a2187d58f44f297a")
+  ;; drand evmnet round 20802058
+  (defconst SIG2 "19d1a6c9bf554b87d004b73acccad64cc0b4370735b609369f92a9a53e8a07870651464a0b393ef8c607ff05eab5dd7b870ff5dfafda7140e0e2ed10387d3160")
+  (defun vmax:decimal (v:[decimal]) (fold (lambda (a:decimal b:decimal) (if (> b a) b a)) 0.0 v))
+  (defun w:object (p:decimal b:decimal t:decimal) { "punto": p, "banco": b, "tie": t, "commission": 1.0 })
+)
+(commit-tx)
+
+;; ============================================================================
+;; I-1  INITIALIZE REFUSES A BAD SETUP — checked BEFORE it succeeds, because
+;;      afterwards every call fails on the game row and proves nothing.
+;; ============================================================================
+(begin-tx)
+(module uprin UG (defcap UG () (enforce true "ok"))
+  ;; Forms the principals this module can make of ITSELF, so the tests below
+  ;; name them by construction. A hardcoded literal would move with the module
+  ;; hash and rot into a test that checks nothing.
+  (defun admin-guard:guard ()
+    (create-capability-guard (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.ADMIN)))
+  (defun admin-principal:string ()
+    (create-principal (admin-guard)))
+  (defun gov-principal:string ()
+    (create-principal (create-capability-guard (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.GOVERNANCE)))))
+(commit-tx)
+
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(expect-failure "I-1 the pot cannot pay revenue to itself"
+  "revenue must not be this module's own pot"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.initialize (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 100000.0))
+(expect-failure "I-1a a revenue account that does not exist yet is refused"
+  "the revenue account must already exist"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.initialize "k:dead000000000000000000000000000000000000000000000000000000000000" 100000.0))
+(expect-failure "I-1b a malformed revenue account is refused" "Account name"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.initialize "!" 100000.0))
+(expect-failure "I-1c a zero target float is refused" "target float must be positive"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.initialize n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT 0.0))
+(expect-failure "I-1d a negative target float is refused" "target float must be positive"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.initialize n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT -1.0))
+(expect-failure "I-1e a sub-precision target float is refused" "Amount violates minimum precision"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.initialize n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT 1.0000000000001))
+(expect-failure "I-1f a claimable plain name is refused -- the squat guard"
+  "revenue must be a principal account"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.initialize "spt-treasury" 100000.0))
+;; `is-principal` accepts `c:`, and this module can form a `c:` of its OWN over
+;; any of its capabilities, none of which any code path can spend from. `revenue`
+;; has no setter and initialize runs once, so naming one would send every fee
+;; and every withdrawal somewhere unrecoverable. The class is refused, so every
+;; one of the three is refused.
+(expect-failure "I-1g nor a c: over another module's capability"
+  "not a c: or p: principal"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.initialize (create-principal (create-capability-guard (uprin.UG))) 100000.0))
+(expect-failure "I-1h nor a c: over ADMIN"
+  "not a c: or p: principal"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.initialize (uprin.admin-principal) 100000.0))
+(expect-failure "I-1i nor a c: over GOVERNANCE"
+  "not a c: or p: principal"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.initialize (uprin.gov-principal) 100000.0))
+(commit-tx)
+
+;; 🔴 AND WITH THE ACCOUNT ACTUALLY CREATED. Without this, I-1h would still go red
+;; on a reverted module -- but on "the revenue account must already exist", the
+;; wrong reason, and it would silently stop testing the class refusal the day
+;; anyone reordered the checks.
+(begin-tx)
+(coin.create-account (uprin.admin-principal) (uprin.admin-guard))
+(commit-tx)
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(expect "I-1j the black-hole account really does exist now" 0.0
+  (coin.get-balance (uprin.admin-principal)))
+(expect-failure "I-1k and it is STILL refused -- by class, not by absence"
+  "not a c: or p: principal"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.initialize (uprin.admin-principal) 100000.0))
+(commit-tx)
+
+;; 🔴 THE OTHER HALF OF THE CLASS CHECK. `and` is BINARY in Pact 5, so the refusal
+;; is one conjunction of two operands; dropping the `p:` operand compiles, loads
+;; and passes every `c:` test above. A `p:` principal is spendable only from
+;; inside the defpact that minted its guard, the same unrecoverable destination.
+;; The literal is a REAL engine-produced `p:` principal (the recipe is in the
+;; roulette unit suite; the pact-guard constructor's name is refused by the
+;; static gate even in comments). Only its SHAPE matters, which I-1l0/I-1l1 assert.
+(begin-tx)
+(module pprin PG (defcap PG () (enforce true "ok"))
+  (defconst P-PRINCIPAL:string "p:DldRwCblQ7Loqy6wYJnaodHl30d3j3eH-qtFzfEv46g:roulette-revenue-probe"))
+(commit-tx)
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(expect "I-1l0 CONTROL the probe really is a p: principal" "p:" (take 2 pprin.P-PRINCIPAL))
+(expect "I-1l1 CONTROL and is-principal accepts it, so THAT is not what refuses it below" true
+  (is-principal pprin.P-PRINCIPAL))
+(expect-failure "I-1l nor a p: pact-guard principal -- the class check, not the absence check"
+  "not a c: or p: principal"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.initialize pprin.P-PRINCIPAL 100000.0))
+;; Two inputs that share "no such account" get two different messages: that is
+;; what proves the class refusal runs FIRST, and what goes red if the p: operand
+;; is dropped (the probe would then report the absence message).
+(expect-failure "I-1l2 CONTROL a NON-EXISTENT k: gets the absence message instead"
+  "the revenue account must already exist"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.initialize "k:dead000000000000000000000000000000000000000000000000000000000000" 100000.0))
+(commit-tx)
+
+;; ============================================================================
+;; S-1  SETUP — initialize writes the LAUNCH dials and a fresh eight-deck shoe
+;;   The launch values are what a first deploy runs under, and initialize is the
+;;   only thing that writes them; every later block retunes them, so they are
+;;   pinned here as literals or nothing in this file would see them move.
+;; ============================================================================
+(begin-tx)
+(expect "S-1 initialize" "baccarat initialized"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.initialize n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT 100000.0))
+(let ((g (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+  (expect "S-1b the launch beacon wait is 120 s" 120.0 (at 'drand-margin g))
+  (expect "S-1b1 the launch betting window is 120 s" 120.0 (at 'bet-window g))
+  (expect "S-1b2 the launch commission is 5%" 0.05 (at 'commission g))
+  (expect "S-1b3 the launch cut card is one deck" 52 (at 'cut-card g))
+  (expect "S-1b4 the launch share of the spare pot is 0.02" 0.02 (at 'reserve-fraction g))
+  (expect "S-1b5 the launch minimum is 0.01 KDA" 0.01 (at 'min-bet g))
+  (expect "S-1b6 the target float is the one passed" 100000.0 (at 'target-float g))
+  (expect "S-1b7 revenue is the recorded m: funding account" n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT (at 'revenue g))
+  (expect "S-1b8 nothing reserved, no round, no beacon seen"
+    [0.0 0 0 0] [(at 'reserved g) (at 'round-seq g) (at 'current g) (at 'last-beacon g)]))
+(let ((s (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status)))
+  (expect "S-1c a fresh shoe holds 416 cards" 416 (at 'remaining s))
+  (expect "S-1c1 it is shoe number 1" 1 (at 'shoe-no s))
+  (expect "S-1c2 no coup has been dealt from it" 0 (at 'dealt-since s))
+  (expect "S-1c3 and it stands before round 1" 0 (at 'shoe-seq s))
+  (expect "S-1c4 of eight decks" 8 (at 'decks s))
+  (expect "S-1c5 eight of each of the 52 kinds" (make-list 52 8) (at 'counts s))
+  (expect "S-1c6 and the counts sum to what `remaining` says" 416 (fold (+) 0 (at 'counts s))))
+(commit-tx)
+(begin-tx)
+(expect-failure "S-1a initialize is once only" "game-table"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.initialize n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT 100000.0))
+(commit-tx)
+(env-sigs [])
+
+(begin-tx)
+(env-sigs [{"key":"h0u5e00000000000000000000000000000000000000000000000000000000004"
+           ,"caps":[(coin.TRANSFER "house-funder" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 100000.0)]}])
+(expect "S-2 fund the pot" "house funded"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.fund-house "house-funder" 100000.0))
+(expect "S-2a the pot holds it" 100000.0
+  (at 'balance (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)))
+(commit-tx)
+(env-sigs [])
+
+;; the table this file plays on: a 5% share (so the limit is a round 5,000), a
+;; 1 KDA minimum, a target equal to the pot, launch waits, commission and cut
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(expect "S-3 all seven dials may be retuned for future rounds" "params set"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.set-params 0.05 1.0 100000.0 120.0 120.0 0.05 52))
+(expect "S-3a the row carries every one of the seven"
+  [0.05 1.0 100000.0 120.0 120.0 0.05]
+  (let ((g (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+    [(at 'reserve-fraction g) (at 'min-bet g) (at 'target-float g) (at 'bet-window g) (at 'drand-margin g) (at 'commission g)]))
+(expect "S-3b and the cut card" 52 (at 'cut-card (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+(expect "S-3c the pot is AT its target, so the fee runs at the full edge" 1.0
+  (at 'fee-scale-now (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)))
+(commit-tx)
+(env-sigs [])
+
+;; ============================================================================
+;; L-1  EVERY WAY A BOARD IS REFUSED, AND THE ADVERTISED LIMITS
+;;   Each refusal is its own rolled-back transaction where a write could precede
+;;   it: a refused over-limit bet has already OPENED the round, and a commit
+;;   would persist a phantom round no successful bet created.
+;; ============================================================================
+(env-chain-data { "block-time": (time "2026-09-20T17:41:13Z") })
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER btest.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 100000.0)]}])
+(begin-tx)
+(expect-failure "L-1 below the table minimum" "total bet below the table minimum"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet btest.ALICE (btest.w 0.5 0.0 0.0)))
+(expect-failure "L-1a an all-zero board is below any minimum" "total bet below the table minimum"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet btest.ALICE (btest.w 0.0 0.0 0.0)))
+(expect-failure "L-1b a negative Punto stake" "every stake must be non-negative"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet btest.ALICE (btest.w -1.0 10.0 0.0)))
+(expect-failure "L-1c a negative Banco stake" "every stake must be non-negative"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet btest.ALICE (btest.w 10.0 -1.0 0.0)))
+(expect-failure "L-1d a negative Tie stake" "every stake must be non-negative"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet btest.ALICE (btest.w 10.0 0.0 -1.0)))
+(expect-failure "L-1e sub-precision dust on Punto" "Amount violates minimum precision"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet btest.ALICE (btest.w 1.0000000000001 0.0 0.0)))
+(expect-failure "L-1f sub-precision dust on Banco" "Amount violates minimum precision"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet btest.ALICE (btest.w 0.0 1.0000000000001 0.0)))
+(expect-failure "L-1g sub-precision dust on Tie" "Amount violates minimum precision"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet btest.ALICE (btest.w 0.0 0.0 1.0000000000001)))
+(expect-failure "L-1h a module account cannot bet" "an m: principal cannot bet"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT (btest.w 10.0 0.0 0.0)))
+(expect "L-1i CONTROL no refusal above opened a round" 0 (at 'round-seq (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+(rollback-tx)
+;; the other side of L-1: a board of exactly the minimum enters
+(begin-tx)
+(expect "L-1j a board of exactly the minimum is accepted" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet btest.ALICE (btest.w 0.4 0.3 0.3)))
+(rollback-tx)
+
+;; the table limit itself: 0.05 x 100000 = 5000, against max(exposure) + fee
+(begin-tx)
+(expect-failure "L-2 a Punto board over the table limit (2 x 2500 + fee)" "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet btest.ALICE (btest.w 2500.0 0.0 0.0)))
+(rollback-tx)
+(begin-tx)
+(expect-failure "L-2' a Banco board over the table limit (2600 x 1.95)" "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet btest.ALICE (btest.w 0.0 2600.0 0.0)))
+(rollback-tx)
+(begin-tx)
+(expect-failure "L-2'' a Tie board over the table limit (600 x 9)" "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet btest.ALICE (btest.w 0.0 0.0 600.0)))
+(rollback-tx)
+
+;; 🔴 the two published figures. With no round open the headroom is 5000, so the
+;; maximum `bet` accepts on Player is about 2,484; the pot is SIZED TO KEEP only
+;; pot/250 = 400 -- and Tie, paying 9 gross, 2/9 of that. Both are published.
+(begin-tx)
+(let* ((ps (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status))
+       (avail (at 'available ps))
+       (ap (at 'max-punto-bet ps)) (ab (at 'max-banco-bet ps)) (at3 (at 'max-tie-bet ps)))
+  (expect "L-2a the Punto sizing figure is pot/250" 400.0 (at 'sized-punto-bet ps))
+  (expect "L-2a1 the Banco sizing figure is pot/250" 400.0 (at 'sized-banco-bet ps))
+  (expect "L-2a2 the Tie sizing figure is 2/9 of that, floored" 88.888888888888 (at 'sized-tie-bet ps))
+  (expect "L-2a3 the Punto maximum is the cap's figure, above the sizing figure at this pot" true (> ap 400.0))
+  (expect "L-2a4 the Banco maximum likewise" true (> ab 400.0))
+  (expect "L-2a5 the Tie maximum likewise" true (> at3 88.888888888888))
+  (expect "L-2a6 CONTROL the maxima are exactly the cap's arithmetic: Punto = floor(5000 / (2 + fee per unit))" (floor (/ 5000.0 (+ 2.0 n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.PUNTO-EDGE)) 12) ap)
+  ;; well above the CONTRACT's cap, not merely above the advert
+  (expect-failure "L-2b a Punto board well above the cap is refused" "would exceed the table limit"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet btest.ALICE (btest.w (* ap 50.0) 0.0 0.0))))
+(rollback-tx)
+(begin-tx)
+(expect-failure "L-2b1 a Banco board well above the cap is refused" "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet btest.ALICE (btest.w 0.0 (* (at 'max-banco-bet (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)) 50.0) 0.0)))
+(rollback-tx)
+(begin-tx)
+(expect-failure "L-2b2 a Tie board well above the cap is refused" "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet btest.ALICE (btest.w 0.0 0.0 (* (at 'max-tie-bet (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)) 50.0))))
+(rollback-tx)
+;; each advertised maximum, verbatim, in its own clean transaction, is ACCEPTED
+(begin-tx)
+(expect "L-2c the advertised Punto maximum itself is accepted" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet btest.ALICE (btest.w (at 'max-punto-bet (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)) 0.0 0.0)))
+(rollback-tx)
+(begin-tx)
+(expect "L-2c1 the advertised Banco maximum itself is accepted" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet btest.ALICE (btest.w 0.0 (at 'max-banco-bet (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)) 0.0)))
+(rollback-tx)
+(begin-tx)
+(expect "L-2c2 the advertised Tie maximum itself is accepted" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet btest.ALICE (btest.w 0.0 0.0 (at 'max-tie-bet (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)))))
+(rollback-tx)
+(env-sigs [])
+
+;; ============================================================================
+;; B-1  THE BET, AND THE ROUND IT OPENS
+;;   Alice places a MIXED board: Punto 100, Banco 20, Tie 5. Its exposure vector
+;;   is [2p, b + floor(b(1-c)), 9t + p + b] = [200, 39, 165]: a Tie pays the Tie
+;;   stake 9 gross and pushes the Punto and Banco stakes back.
+;; ============================================================================
+(env-chain-data { "block-time": (time "2026-09-20T17:42:13Z") })
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER btest.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 100000.0)]}])
+(begin-tx)
+(env-gasmodel "table")
+(env-gaslimit 150000)
+(env-gas 0)
+(expect "B-1 alice's mixed board opens round 1" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet btest.ALICE (btest.w 100.0 20.0 5.0)))
+(print (format "GAS bet (opens the round): {}" [(env-gas)]))
+(expect "G-1 a bet that opens a round is far inside the block gas limit" true (< (env-gas) 2000))
+(env-gaslimit 99999999)
+(commit-tx)
+
+(begin-tx)
+(let ((r (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 1)))
+  (expect "B-2 the round closes one bet-window after it opened" (time "2026-09-20T17:44:13Z")
+    (at 'close-time r))
+  (expect "B-2a the pinned drand round is the one published one beacon wait after close" 20801767
+    (at 'drand-round r))
+  (expect "B-2b it is not published until after betting closes" true
+    (> (diff-time (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.time-of-round (at 'drand-round r)) (at 'close-time r)) 0.0))
+  (expect "B-3 exposure per slot for the mixed board" [200.0 39.0 165.0] (at 'exposure r))
+  (expect "B-3a the stake is the sum of the three" 125.0 (at 'stake r))
+  ;; the fee per type at the full edge (scale 1.0):
+  ;;   PUNTO-EDGE x 100 = 1.2350813289
+  ;;   banco-edge(0.05) x 20 = 0.21158115686
+  ;;   TIE-EDGE x 5 = 0.71798143892         total 2.16464392468
+  (expect "B-3b the fee is each bet type at its own edge" 2.164643924675 (at 'fee-owed r))
+  (expect "B-4 the reserve is max(exposure) + fee" 202.164643924675 (at 'reserve r))
+  (expect "B-4a the reserve dominates the best slot" true
+    (>= (at 'reserve r) (btest.vmax (at 'exposure r))))
+  (expect "B-4b and a full refund WITH the accrued fee inside it" true
+    (>= (at 'reserve r) (+ (at 'stake r) (at 'fee-owed r))))
+  (expect "B-4c reserved on the game row equals this round's reserve"
+    (at 'reserve r) (at 'reserved (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)))
+  (expect "B-4d the round froze the launch commission and cut it opened under"
+    [0.05 52 1.0 0.05 100000.0]
+    [(at 'commission-at-open r) (at 'cut-at-open r) (at 'min-bet-at-open r) (at 'frac-at-open r) (at 'avail-at-open r)]))
+(commit-tx)
+(env-sigs [])
+
+;; bob backs Banco and Tie: he is the loser whose reserve must come back. He bets
+;; AFTER alice's reserve has pulled `available` under the target, so the ramp
+;; charges him a scale of floor(99922.83535607532 / 100000, 12).
+(begin-tx)
+(expect "C-3r the ramp is live: the pot is now below target" 0.999228353560
+  (at 'fee-scale-now (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)))
+(commit-tx)
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER btest.BOB (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 100000.0)]}])
+(begin-tx)
+(env-gasmodel "table")
+(env-gaslimit 150000)
+(env-gas 0)
+(expect "B-5 bob joins the SAME round" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet btest.BOB (btest.w 0.0 50.0 5.0)))
+(print (format "GAS bet (joins the round): {}" [(env-gas)]))
+(expect "G-1a a bet that joins a round too" true (< (env-gas) 2000))
+(env-gaslimit 99999999)
+(commit-tx)
+(env-sigs [])
+
+(begin-tx)
+(let ((r (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 1)))
+  ;; 🔴 ADDITIVE. The round's vector must be the slot-wise sum of the boards'
+  ;; own vectors, computed here by the same pure function the claim uses.
+  (expect "B-5c the exposure vector is additive over boards"
+    (zip (+) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.board-vector 100.0 20.0 5.0 0.05) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.board-vector 0.0 50.0 5.0 0.05))
+    (at 'exposure r))
+  (expect "B-5c1 and that sum is [200, 136.5, 260]" [200.0 136.5 260.0] (at 'exposure r))
+  (expect "B-5c2 the stake is both boards" 180.0 (at 'stake r))
+  ;; bob's fee: floor(0.999228353560 x (banco-edge x 50 + TIE-EDGE x 5), 12)
+  ;;          = floor(0.999228353560 x 1.24693433107, 12) = 1.245972138632
+  (expect "C-3s fee arithmetic at the ramp: alice at 1.0 plus bob at 0.99922835356"
+    3.410616063272 (at 'fee-owed r))
+  (expect "C-3t the ramp charged bob LESS than his full edge 1.24693433107" true
+    (< (- (at 'fee-owed r) 2.164643924680) 1.24693433107))
+  (expect "B-5d the reserve is now the Tie slot plus the fee" 263.410616063272 (at 'reserve r)))
+(commit-tx)
+
+;; 🔴 the advertised maxima MID-ROUND. L-2c ran with no round open; with exposure
+;; already on the round each advert must STILL be a board `bet` accepts.
+(env-sigs [{"key":"ca40100000000000000000000000000000000000000000000000000000000003"
+           ,"caps":[(coin.TRANSFER btest.CAROL (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 100000.0)]}])
+(begin-tx)
+(let ((adv (at 'max-punto-bet (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status))))
+  (expect "B-5e mid-round, the advertised Punto maximum is still positive" true (> adv 0.0))
+  (expect "B-5f and is STILL accepted with a round already open" "bet placed in round 1"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet btest.CAROL (btest.w adv 0.0 0.0))))
+(rollback-tx)
+(begin-tx)
+(expect "B-5g so is the Banco one" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet btest.CAROL (btest.w 0.0 (at 'max-banco-bet (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)) 0.0)))
+(rollback-tx)
+(begin-tx)
+(expect "B-5h and the Tie one" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet btest.CAROL (btest.w 0.0 0.0 (at 'max-tie-bet (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)))))
+(rollback-tx)
+(env-sigs [])
+
+(begin-tx)
+(expect "B-6 SOLVENCY: reserved never exceeds the balance" true
+  (<= (at 'reserved (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)) (at 'balance (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status))))
+(commit-tx)
+
+;; a bet after the window has closed opens a NEW round. The clock is chosen so
+;; round 2 pins 20802058: time-of-round(20802058) = 18:00:46Z, less the 240 s of
+;; window plus wait = 17:56:46Z.
+(env-chain-data { "block-time": (time "2026-09-20T17:56:46Z") })
+(env-sigs [{"key":"ca40100000000000000000000000000000000000000000000000000000000003"
+           ,"caps":[(coin.TRANSFER btest.CAROL (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 100000.0)]}])
+(begin-tx)
+(expect "B-7 betting after the close starts round 2" "bet placed in round 2"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet btest.CAROL (btest.w 0.0 40.0 0.0)))
+(expect "B-7a round 2 pins beacon 20802058" 20802058 (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 2)))
+(commit-tx)
+(env-sigs [])
+
+;; ============================================================================
+;; R-1  RESOLVE WITH A REAL BEACON
+;; ============================================================================
+(env-chain-data { "block-time": (time "2026-09-20T17:57:00Z") })
+(begin-tx)
+(expect-failure "R-0 a genuine beacon for the WRONG drand round does not verify"
+  "drand signature does not verify"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.resolve 1 btest.SIG-NEXT))
+(rollback-tx)
+(begin-tx)
+(expect-failure "R-0a coups are dealt in round order: round 2 waits for round 1"
+  "coups are dealt in round order: settle the earlier round first"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.resolve 2 btest.SIG2))
+(rollback-tx)
+
+(begin-tx)
+(env-events true)            ; clear, so what follows is this transaction's only
+(env-gasmodel "table")
+(env-gaslimit 150000)
+(env-gas 0)
+(expect "R-1 round 1 resolves to Punto" "punto" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.resolve 1 btest.SIG))
+(print (format "GAS resolve (verify + deal + settle + fee): {}" [(env-gas)]))
+(expect "G-2 resolve fits well inside one block" true (< (env-gas) 6000))
+(env-gaslimit 99999999)
+;; 🔴 E-1 the public record of the coup. The `module-hash` field is deliberately
+;; NOT compared: it changes with every edit to baccarat.pact.
+(let ((evs (map (lambda (e:object) { "name": (at 'name e), "params": (at 'params e) })
+                (env-events true))))
+  (expect "E-1 COUP-RESULT is (seq, winner, drand-round, punto, banco), in that order" true
+    (contains { "name": "n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.COUP-RESULT"
+              , "params": [1 "punto" 20801767 ["3H" "4C"] ["QC" "10C" "3S"]] } evs))
+  (expect "E-1a CONTROL the swapped winner / drand-round order is NOT what was emitted" false
+    (contains { "name": "n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.COUP-RESULT"
+              , "params": [1 20801767 "punto" ["3H" "4C"] ["QC" "10C" "3S"]] } evs))
+  (expect "E-1b CONTROL nor the hands swapped" false
+    (contains { "name": "n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.COUP-RESULT"
+              , "params": [1 "punto" 20801767 ["QC" "10C" "3S"] ["3H" "4C"]] } evs))
+  (expect "E-1c the fee payment was announced in the same transaction, to the recorded account" true
+    (contains { "name": "n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.FEE-PAID"
+              , "params": [1 3.410616063272 n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT] } evs))
+  (expect "E-1d no refill: the shoe was far above the cut" false
+    (contains "n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.SHOE-SHUFFLED" (map (lambda (e:object) (at 'name e)) evs))))
+(commit-tx)
+
+;; ============================================================================
+;; C-1  SETTLEMENT — Punto 3H 4C = 7 beats Banco QC 10C 3S = 3: alice's Punto
+;;      wins, alice's and bob's Banco and Tie lose
+;; ============================================================================
+(begin-tx)
+(let ((r (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 1)))
+  (expect "C-1 the round is resolved to Punto" "punto" (at 'winner r))
+  (expect "C-1a liability is EXACTLY the Punto slot of the exposure vector"
+    (at 0 (at 'exposure r)) (at 'liability r))
+  (expect "C-1b alice's 100 on Punto at 1:1 returns 200" 200.0 (at 'liability r))
+  (expect "C-1c the dealt hands are on the round" [["3H" "4C"] ["QC" "10C" "3S"]]
+    [(at 'punto r) (at 'banco r)]))
+(let ((s (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status)))
+  (expect "C-1d five cards left the shoe: 411 remain" 411 (at 'remaining s))
+  (expect "C-1e the shoe now stands after round 1" 1 (at 'shoe-seq s))
+  (expect "C-1f one coup dealt from shoe 1" [1 1] [(at 'dealt-since s) (at 'shoe-no s)])
+  (expect "C-1g and the counts sum to 411: the unused sixth card went back" 411
+    (fold (+) 0 (at 'counts s)))
+  ;; index = 4 x rank + suit: 3S 8, 3H 9, 4C 15, 10C 39, QC 47
+  (expect "C-1h exactly the five dealt kinds are down to 7" [7 7 7 7 7]
+    (map (lambda (i:integer) (at i (at 'counts s))) [8 9 15 39 47]))
+  (expect "C-1i CONTROL and 47 kinds still hold 8" 47
+    (length (filter (lambda (n:integer) (= n 8)) (at 'counts s)))))
+(expect "C-1j a verified beacon is recorded as proof drand was alive" 20801767
+  (at 'last-beacon (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+(commit-tx)
+
+;; 🔴 THE PROPERTY PULL SETTLEMENT DEPENDS ON: the losers never send anything,
+;;    and their reserve is released anyway.
+(begin-tx)
+(expect "C-2 round 1 now locks only the real liability, not the worst case" 200.0
+  (- (at 'reserved (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)) (at 'reserve (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 2))))
+(expect "C-2a round 1's row still records the worst case it had locked" 263.410616063272
+  (at 'reserve (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 1)))
+(commit-tx)
+
+(begin-tx)
+(expect "C-3 the fee reached the recorded account exactly once: alice's plus bob's" 3.410616063272
+  (coin.get-balance n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT))
+(expect "C-3b the accrual is cleared once paid, so it cannot read as outstanding" 0.0
+  (at 'fee-owed (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 1)))
+(commit-tx)
+
+(begin-tx)
+(expect-failure "C-4 resolving twice is refused" "this round is already settled"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.resolve 1 btest.SIG))
+(commit-tx)
+
+;; ============================================================================
+;; C-5  CLAIMS
+;; ============================================================================
+(begin-tx)
+(env-events true)
+(env-gasmodel "table")
+(env-gaslimit 150000)
+(env-gas 0)
+(expect "C-5 alice claims her win" "paid 200.0"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.claim 1 btest.ALICE))
+(print (format "GAS claim: {}" [(env-gas)]))
+(expect "G-3 a claim fits under a 2000 gas ceiling" true (< (env-gas) 2000))
+(env-gaslimit 99999999)
+(let ((evs (map (lambda (e:object) { "name": (at 'name e), "params": (at 'params e) })
+                (env-events true))))
+  (expect "E-2 claim emits CLAIMED as (account, seq, amount)" true
+    (contains { "name": "n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.CLAIMED", "params": [btest.ALICE 1 200.0] } evs))
+  (expect "E-2a CONTROL it names the BOARD's account, not some other one" false
+    (contains { "name": "n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.CLAIMED", "params": [btest.BOB 1 200.0] } evs)))
+(expect "C-5a she staked 125 and got 200 back" 100075.0 (coin.get-balance btest.ALICE))
+(expect "C-5b round 1 owes nothing now" 0.0 (at 'liability (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 1)))
+(expect "C-5c and locks nothing: reserved is exactly round 2's reserve"
+  (at 'reserve (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 2)) (at 'reserved (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)))
+(commit-tx)
+
+(begin-tx)
+(expect-failure "C-6 claiming twice is refused" "this board has already been claimed"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.claim 1 btest.ALICE))
+(expect-failure "C-6a a loser has nothing to claim" "nothing to claim: this board did not win"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.claim 1 btest.BOB))
+(expect-failure "C-6b an unresolved round cannot be claimed" "this round has not been settled yet"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.claim 2 btest.CAROL))
+(expect-failure "C-6c a board that was never placed" "No value found"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.claim 1 "k:0000000000000000000000000000000000000000000000000000000000000000"))
+(commit-tx)
+
+(begin-tx)
+(expect "C-7 SOLVENCY holds after settlement" true
+  (<= (at 'reserved (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)) (at 'balance (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status))))
+(expect "C-7a reserved is never negative" true
+  (>= (at 'reserved (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)) 0.0))
+(commit-tx)
+
+;; ============================================================================
+;; C-8  THE TIE PUSH, AND THE COMMISSION A CLAIM PAYS AT
+;;   Nobody can choose a coup's outcome, so the push is pinned through the two
+;;   pure functions the exposure vector and the claim are both built from.
+;;   A Tie returns the Punto and Banco stakes and pays the Tie stake 9 gross.
+;; ============================================================================
+(begin-tx)
+(expect "C-8 a Punto board pushes on a Tie" 10.0 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.board-payout 10.0 0.0 0.0 0.05 "tie"))
+(expect "C-8a a Banco board pushes on a Tie, commission untouched" 10.0 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.board-payout 0.0 10.0 0.0 0.05 "tie"))
+(expect "C-8b a Tie board is paid 9 gross" 90.0 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.board-payout 0.0 0.0 10.0 0.05 "tie"))
+(expect "C-8c a mixed board on a Tie: 10 + 10 back and 90 paid" 110.0 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.board-payout 10.0 10.0 10.0 0.05 "tie"))
+(expect "C-8d the Tie slot of each board's vector is that push"
+  [[20.0 0.0 10.0] [0.0 19.5 10.0] [0.0 0.0 90.0]]
+  [(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.board-vector 10.0 0.0 0.0 0.05) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.board-vector 0.0 10.0 0.0 0.05) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.board-vector 0.0 0.0 10.0 0.05)])
+(expect "C-8e CONTROL a Punto board LOSES on Banco" 0.0 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.board-payout 10.0 0.0 0.0 0.05 "banco"))
+(expect-failure "C-8f a winner that is not an outcome is refused" "not an outcome"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.board-payout 10.0 0.0 0.0 0.05 "dragon"))
+(commit-tx)
+
+;; 🔴 carol's round 2 opened at 5%. The live commission now moves to 3%; round 2
+;; goes to Banco, and her claim must be paid at the ROUND's 5%, not the live 3%.
+(env-chain-data { "block-time": (time "2026-09-20T18:01:00Z") })
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.set-params 0.05 1.0 100000.0 120.0 120.0 0.03 52)
+(commit-tx)
+(env-sigs [])
+(begin-tx)
+(expect "C-8g PRECONDITION the live commission moved to 3%" 0.03 (at 'commission (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+(expect "C-8h PRECONDITION round 2 still carries the 5% it opened under" 0.05
+  (at 'commission-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 2)))
+(expect "C-8i round 2 resolves to Banco" "banco" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.resolve 2 btest.SIG2))
+(expect "C-8j CONTROL at the live 3% the same board would be owed more" true
+  (> (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.board-payout 0.0 40.0 0.0 0.03 "banco") (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.board-payout 0.0 40.0 0.0 0.05 "banco")))
+(let ((before (coin.get-balance btest.CAROL)))
+  (expect "C-8k carol's claim is board-payout at the ROUND's commission: 40 + 38"
+    (format "paid {}" [(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.board-payout 0.0 40.0 0.0 0.05 "banco")])
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.claim 2 btest.CAROL))
+  (expect "C-8l and exactly 78.0 reached her" 78.0 (- (coin.get-balance btest.CAROL) before)))
+(expect "C-8m round 2 owes nothing now" 0.0 (at 'liability (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 2)))
+;; round 2's fee: floor(0.999165893839 x banco-edge(0.05) x 40, 12)
+(expect "C-8n both fees have now reached the recorded account" 3.833425414659
+  (coin.get-balance n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT))
+(commit-tx)
+
+;; ============================================================================
+;; V-1  A DRAND STALL REFUNDS — it does NOT forfeit
+;; ============================================================================
+;; 🔴 V-0 the liveness half. A round whose own beacon is at or below one this
+;; module has ALREADY verified must be resolved, never refunded: drand was alive.
+;; Round 2's 20802058 is on record, so a round opened at 17:56:46Z pins that very
+;; beacon. Rolled back: the probe round must not outlive this block.
+(env-chain-data { "block-time": (time "2026-09-20T17:56:46Z") })
+(env-sigs [{"key":"ca40100000000000000000000000000000000000000000000000000000000003"
+           ,"caps":[(coin.TRANSFER btest.CAROL (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 100000.0)]}])
+(begin-tx)
+(expect "V-0 PRECONDITION a probe round opens" "bet placed in round 3"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet btest.CAROL (btest.w 10.0 0.0 0.0)))
+(expect "V-0a PRECONDITION its beacon is one the module has already verified" true
+  (= (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 3)) (at 'last-beacon (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params))))
+(env-chain-data { "block-time": (time "2026-12-25T00:00:00Z") })
+(expect-failure "V-0b past the grace, a round whose beacon drand has since passed is NOT refundable"
+  "drand has been seen since this round: resolve it, do not refund it"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.void-round 3))
+(rollback-tx)
+(env-sigs [])
+
+(env-chain-data { "block-time": (time "2026-09-22T00:00:00Z") })
+(env-sigs [{"key":"ca40100000000000000000000000000000000000000000000000000000000003"
+           ,"caps":[(coin.TRANSFER btest.CAROL (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 100000.0)]}])
+(begin-tx)
+(expect "V-1p carol opens round 3" "bet placed in round 3"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet btest.CAROL (btest.w 10.0 0.0 0.0)))
+(commit-tx)
+(env-sigs [])
+(begin-tx)
+(expect-failure "V-1 a round cannot be voided while its beacon can still arrive"
+  "the beacon can still be submitted"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.void-round 3))
+(rollback-tx)
+;; 🔴 and AFTER the beacon was due but inside the ninety days: V-1 alone runs
+;; before the beacon is even published, so it would pass against a grace of zero.
+(env-chain-data { "block-time": (time "2026-11-01T00:00:00Z") })
+(begin-tx)
+(expect "V-1a PRECONDITION round 3's beacon is already overdue" true
+  (> (diff-time (at 'block-time (chain-data)) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.time-of-round (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 3)))) 0.0))
+(expect-failure "V-1b a month overdue is still inside the grace: no refund"
+  "the beacon can still be submitted"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.void-round 3))
+(rollback-tx)
+
+(env-chain-data { "block-time": (time "2026-12-25T00:00:00Z") })
+(begin-tx)
+(let ((rev0 (coin.get-balance n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT))
+      (rem0 (at 'remaining (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status))))
+  (expect "V-2 after the void window, the round refunds" "round void: every stake is refundable"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.void-round 3))
+  (expect "V-2a it owes exactly the stake back" 10.0 (at 'liability (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 3)))
+  (expect "V-2b no fee is taken on a void: the accrual is dropped" 0.0 (at 'fee-owed (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 3)))
+  (expect "V-2c and none is paid" rev0 (coin.get-balance n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT))
+  (expect "V-2d the void takes round 3's turn in the shoe order" 3 (at 'shoe-seq (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status)))
+  (expect "V-2e without dealing a card" rem0 (at 'remaining (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status)))
+  (expect "V-2f the round is marked void" "void" (at 'state (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 3))))
+(commit-tx)
+
+(begin-tx)
+(expect "V-3 carol gets her whole stake back" "paid 10.0"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.claim 3 btest.CAROL))
+(expect "V-3a nothing is locked once every round is settled" 0.0
+  (at 'reserved (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)))
+;; Funded 100000, took 125 + 55 + 40 + 10 of stake, paid alice 200, carol 78 and
+;; carol's 10 back, and sent 3.410616063312 + 0.422809351427 of fee away.
+(expect "V-3b the pot kept the losing stakes and paid only the fees"
+  99938.166574585341 (at 'balance (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)))
+(commit-tx)
+
+(begin-tx)
+(expect-failure "V-4 a resolved round cannot be voided" "this round is not open"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.void-round 1))
+(expect-failure "V-4a nor a voided one voided twice" "this round is not open"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.void-round 3))
+(commit-tx)
+
+;; ============================================================================
+;; W-1  ADMIN BOUNDS — all seven dials, both edges, exact rendered messages
+;;   VALUE TESTS: literals on purpose. The expected substring carries the
+;;   RENDERED bound, so moving a constant changes the message and this goes red.
+;;   1e-12 is the smallest step the 12-decimal precision admits, so nothing sits
+;;   between a refused input and the bound it is refused by.
+;;   Base: 0.05 1.0 100000.0 120.0 120.0 0.05 52.
+;; ============================================================================
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+;; reserve-fraction (0, 1.0]
+(expect-failure "W-1r the share cannot exceed the whole spare pot" "reserve-fraction must be in (0, 1.0]"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.set-params 1.000000000001 1.0 100000.0 120.0 120.0 0.05 52))
+(expect-failure "W-1r1 nor be zero" "reserve-fraction must be in (0, 1.0]"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.set-params 0.0 1.0 100000.0 120.0 120.0 0.05 52))
+(expect-failure "W-1r2 nor negative" "reserve-fraction must be in (0, 1.0]"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.set-params -0.05 1.0 100000.0 120.0 120.0 0.05 52))
+;; min-bet [0.001, ...)
+(expect-failure "W-1m the minimum cannot go below the floor" "min-bet below the floor 0.001"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.set-params 0.05 0.000999999999 100000.0 120.0 120.0 0.05 52))
+(expect-failure "W-1m1 a sub-precision minimum is refused" "Amount violates minimum precision"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.set-params 0.05 1.0000000000001 100000.0 120.0 120.0 0.05 52))
+;; target-float (0, ...)
+(expect-failure "W-1t a zero target float is refused" "target float must be positive"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.set-params 0.05 1.0 0.0 120.0 120.0 0.05 52))
+(expect-failure "W-1t1 a negative target float is refused" "target float must be positive"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.set-params 0.05 1.0 -1.0 120.0 120.0 0.05 52))
+(expect-failure "W-1t2 a sub-precision target float is refused" "Amount violates minimum precision"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.set-params 0.05 1.0 1.0000000000001 120.0 120.0 0.05 52))
+;; bet-window [30, 3600]
+(expect-failure "W-1w the window cannot go below 30 s" "bet-window must be in [30.0, 3600.0]"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.set-params 0.05 1.0 100000.0 29.999999999999 120.0 0.05 52))
+(expect-failure "W-1w1 nor above 3600 s" "bet-window must be in [30.0, 3600.0]"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.set-params 0.05 1.0 100000.0 3600.000000000001 120.0 0.05 52))
+;; drand-margin [60, 3600] -- the dial whose dangerous direction is DOWN
+(expect-failure "W-1d the beacon wait cannot go below 60 s" "drand-margin must be in [60.0, 3600.0]"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.set-params 0.05 1.0 100000.0 120.0 59.999999999999 0.05 52))
+(expect-failure "W-1d1 nor above 3600 s" "drand-margin must be in [60.0, 3600.0]"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.set-params 0.05 1.0 100000.0 120.0 3600.000000000001 0.05 52))
+;; commission [MIN-COMMISSION, 1.0], at most 12 decimals
+(expect-failure "W-1c one step below the zero-edge floor is refused"
+  "commission must be in [0.026931711082, 1.0]"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.set-params 0.05 1.0 100000.0 120.0 120.0 0.026931711081 52))
+(expect-failure "W-1c1 one step above 100% is refused"
+  "commission must be in [0.026931711082, 1.0]"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.set-params 0.05 1.0 100000.0 120.0 120.0 1.000000000001 52))
+(expect-failure "W-1c2 a 13-decimal commission is refused"
+  "commission exceeds 12 decimal places"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.set-params 0.05 1.0 100000.0 120.0 120.0 0.0500000000001 52))
+;; cut-card [14, 416]
+(expect-failure "W-1k the cut cannot go below 14 cards" "cut-card must be in [14, 416]"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.set-params 0.05 1.0 100000.0 120.0 120.0 0.05 13))
+(expect-failure "W-1k1 nor above the whole shoe" "cut-card must be in [14, 416]"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.set-params 0.05 1.0 100000.0 120.0 120.0 0.05 417))
+(commit-tx)
+
+;; 🔴 The ACCEPTING side, each in its own rolled-back transaction ON PURPOSE: a
+;; 1.0 share or a 1,000,000 KDA minimum left in the row would retune every later
+;; block. A one-sided refusal test passes unchanged against a range narrowed to
+;; a single value, so every open edge is measured AND read back from the row.
+(begin-tx)
+(expect "W-1r3 the whole spare pot is attainable" "params set"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.set-params 1.0 1.0 100000.0 120.0 120.0 0.05 52))
+(expect "W-1r4 and recorded" 1.0 (at 'reserve-fraction (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+(rollback-tx)
+(begin-tx)
+(expect "W-1r5 the smallest positive share is attainable" "params set"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.set-params 0.000000000001 1.0 100000.0 120.0 120.0 0.05 52))
+(rollback-tx)
+(begin-tx)
+(expect "W-1m2 the floor itself is attainable" "params set"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.set-params 0.05 0.001 100000.0 120.0 120.0 0.05 52))
+(expect "W-1m3 and recorded" 0.001 (at 'min-bet (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+(rollback-tx)
+;; 🔴 PINNED AS ACCEPTED. There is no ceiling on the minimum, so the operator can
+;; close the table to new bets; that is the disclosed cost of the dial.
+(begin-tx)
+(expect "W-1m4 a minimum far above any bankroll is ACCEPTED" "params set"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.set-params 0.05 1000000.0 100000.0 120.0 120.0 0.05 52))
+(rollback-tx)
+(begin-tx)
+(expect "W-1w2 the 30 s window is attainable" "params set"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.set-params 0.05 1.0 100000.0 30.0 120.0 0.05 52))
+(expect "W-1w3 and recorded" 30.0 (at 'bet-window (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+(rollback-tx)
+(begin-tx)
+(expect "W-1w4 the 3600 s window is attainable" "params set"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.set-params 0.05 1.0 100000.0 3600.0 120.0 0.05 52))
+(expect "W-1w5 and recorded" 3600.0 (at 'bet-window (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+(rollback-tx)
+(begin-tx)
+(expect "W-1d2 the 60 s wait is attainable" "params set"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.set-params 0.05 1.0 100000.0 120.0 60.0 0.05 52))
+(expect "W-1d3 and recorded" 60.0 (at 'drand-margin (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+(rollback-tx)
+(begin-tx)
+(expect "W-1d4 the 3600 s wait is attainable" "params set"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.set-params 0.05 1.0 100000.0 120.0 3600.0 0.05 52))
+(expect "W-1d5 and recorded" 3600.0 (at 'drand-margin (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+(rollback-tx)
+(begin-tx)
+(expect "W-1c3 the zero-edge floor itself is attainable" "params set"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.set-params 0.05 1.0 100000.0 120.0 120.0 0.026931711082 52))
+(expect "W-1c4 and recorded" 0.026931711082 (at 'commission (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+(rollback-tx)
+(begin-tx)
+(expect "W-1c5 a 100% commission is attainable" "params set"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.set-params 0.05 1.0 100000.0 120.0 120.0 1.0 52))
+(expect "W-1c6 and recorded" 1.0 (at 'commission (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+(rollback-tx)
+(begin-tx)
+(expect "W-1k2 the half-deck cut is attainable" "params set"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.set-params 0.05 1.0 100000.0 120.0 120.0 0.05 26))
+(expect "W-1k3 and recorded" 26 (at 'cut-card (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+(rollback-tx)
+(begin-tx)
+(expect "W-1k4 the whole-shoe cut is attainable" "params set"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.set-params 0.05 1.0 100000.0 120.0 120.0 0.05 416))
+(expect "W-1k5 and recorded" 416 (at 'cut-card (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+(rollback-tx)
+(begin-tx)
+(expect "W-1z CONTROL the rollbacks left C-8's live 3% in force" 0.03
+  (at 'commission (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+;; back to the base table for everything below
+(expect "W-1z1 restore the base table" "params set"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.set-params 0.05 1.0 100000.0 120.0 120.0 0.05 52))
+(commit-tx)
+(env-sigs [])
+
+(begin-tx)
+(expect-failure "W-2 a non-admin cannot retune the table" "Keyset failure"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.set-params 0.05 1.0 100000.0 120.0 120.0 0.05 52))
+(expect-failure "W-2a a non-admin cannot withdraw" "Keyset failure"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.withdraw-house 1.0))
+(expect-failure "W-2b a non-admin cannot initialize either" "Keyset failure"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.initialize n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT 100000.0))
+(commit-tx)
+
+;; ============================================================================
+;; F-0  A BET THAT FAILS AT THE COIN TRANSFER — the widest leak shape.
+;;   It aborts AFTER `update rounds` and `update game-table` and BEFORE `insert
+;;   boards`. On a node the transaction is atomic; IN THE REPL `expect-failure`
+;;   then `commit-tx` would persist the half-written round. So this block ends in
+;;   `rollback-tx`, and the next one asserts the state is CLEAN.
+;; ============================================================================
+(env-chain-data { "block-time": (time "2026-12-26T01:00:00Z") })
+(env-sigs [])   ; no signature: the managed transfer was never installed
+(begin-tx)
+(let ((before (at 'reserved (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status))))
+  (expect-failure "F-0 an unsigned bet is refused at the coin transfer"
+    "Managed capability not installed"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet btest.BOB (btest.w 50.0 0.0 0.0)))
+  (expect "F-0a the round writes DID happen before the transfer aborted" true
+    (> (at 'reserved (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)) before)))
+(rollback-tx)
+(begin-tx)
+(expect "F-0b after the rollback no round was opened" 3 (at 'round-seq (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+(expect "F-0c and nothing is reserved" 0.0 (at 'reserved (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)))
+(expect-failure "F-0d and bob has no board in the round that never was" "No value found"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-board 4 btest.BOB))
+(commit-tx)
+
+;; F-1 / W-3  THE MONEY DOORS — every bound on getting KDA in and out
+;; ============================================================================
+(begin-tx)
+(expect-failure "F-1 funding the pot with nothing is refused" "fund amount must be positive"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.fund-house "house-funder" 0.0))
+(expect-failure "F-1a funding a negative amount is refused" "fund amount must be positive"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.fund-house "house-funder" -5.0))
+(commit-tx)
+
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(expect-failure "W-3 withdrawing nothing is refused" "withdrawal amount must be positive"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.withdraw-house 0.0))
+(expect-failure "W-3a withdrawing a negative amount is refused" "withdrawal amount must be positive"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.withdraw-house -5.0))
+(expect-failure "W-3b sub-precision withdrawal is refused" "Amount violates minimum precision"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.withdraw-house 1.0000000000001))
+(commit-tx)
+(env-sigs [])
+
+;; money locked against an open board, so W-4 has something to protect
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER btest.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 100000.0)]}])
+(begin-tx)
+(expect "W-4p alice opens round 4" "bet placed in round 4"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet btest.ALICE (btest.w 40.0 0.0 0.0)))
+(commit-tx)
+
+;; 🔴 THE ONE THAT MATTERS: reserved funds are NOT the house's to take.
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(let ((avail (at 'available (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status))))
+  (expect "W-4 there is money locked against an open board right now" true
+    (> (at 'reserved (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)) 0.0))
+  (expect-failure "W-4a the admin cannot withdraw past the unreserved balance"
+    "exceeds unreserved balance"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.withdraw-house (+ avail 0.000000000001)))
+  ;; the destination is NOT a parameter: it is the account fixed at initialize
+  (let ((rev-before (coin.get-balance n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT)))
+    (expect "W-4b the whole unreserved balance IS withdrawable" "house withdrawal complete"
+      (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.withdraw-house avail))
+    (expect "W-4b2 and it went to the RECORDED revenue account" (+ rev-before avail)
+      (coin.get-balance n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT)))
+  (expect "W-4c which leaves the pot holding exactly its liabilities" 0.0
+    (at 'available (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)))
+  (expect "W-4d SOLVENCY still holds at the boundary" true
+    (<= (at 'reserved (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)) (at 'balance (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status))))
+  ;; with no spare capital every advertised maximum is under the minimum, and the
+  ;; advert says 0.0 rather than a number `bet` would refuse
+  (expect "W-4e an empty pot advertises no board at all" [0.0 0.0 0.0]
+    (let ((ps (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status))) [(at 'max-punto-bet ps) (at 'max-banco-bet ps) (at 'max-tie-bet ps)])))
+(commit-tx)
+(env-sigs [])
+
+(begin-tx)
+(expect-failure "B-8 a malformed account cannot bet" "Account name"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet "!" (btest.w 10.0 0.0 0.0)))
+(commit-tx)
+
+;; ============================================================================
+;; A-1  THE TABLE LIMIT BOUNDS THE ROUND, NOT THE BOARD
+;;   Bounding one board against the CURRENT available lets boards stack: each
+;;   shrinks `available` only by its own reserve, so N correlated boards converge
+;;   on the whole pot riding one outcome.
+;; ============================================================================
+(env-chain-data { "block-time": (time "2026-12-27T00:00:00Z") })
+(env-sigs [{"key":"h0u5e00000000000000000000000000000000000000000000000000000000004"
+           ,"caps":[(coin.TRANSFER "house-funder" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 100000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.fund-house "house-funder" 100000.0)
+(commit-tx)
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER btest.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 100000.0)]}])
+(begin-tx)
+(expect "A-1p alice opens round 5 with 1000 on Punto" "bet placed in round 5"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet btest.ALICE (btest.w 1000.0 0.0 0.0)))
+(commit-tx)
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER btest.BOB (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 100000.0)]}])
+(begin-tx)
+(expect "A-1q bob joins with 1000 on Punto" "bet placed in round 5"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet btest.BOB (btest.w 1000.0 0.0 0.0)))
+(commit-tx)
+(env-sigs [{"key":"ca40100000000000000000000000000000000000000000000000000000000003"
+           ,"caps":[(coin.TRANSFER btest.CAROL (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 100000.0)]}])
+(begin-tx)
+;; a third correlated board would take the ROUND past its cap, though each board
+;; on its own is small and `available` has barely moved
+(expect-failure "A-1 a third board on the same outcome is refused by the ROUND cap"
+  "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet btest.CAROL (btest.w 1000.0 0.0 0.0)))
+(rollback-tx)
+;; 🔴 the cap is the SMALLER of the pot at open and the pot now. Funding the pot
+;; mid-round doubles `available`, and the same third board is STILL refused: a
+;; cap measured against the pot now would have let it in.
+(env-sigs [{"key":"h0u5e00000000000000000000000000000000000000000000000000000000004"
+           ,"caps":[(coin.TRANSFER "house-funder" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 100000.0)]}
+          ,{"key":"ca40100000000000000000000000000000000000000000000000000000000003"
+           ,"caps":[(coin.TRANSFER btest.CAROL (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 100000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.fund-house "house-funder" 100000.0)
+(expect "A-1d PRECONDITION the spare pot now far exceeds what the round opened with" true
+  (> (at 'available (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)) (* 1.9 (at 'avail-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 5)))))
+(expect-failure "A-1e funding mid-round does not raise the round's cap"
+  "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet btest.CAROL (btest.w 1000.0 0.0 0.0)))
+(rollback-tx)
+(env-sigs [])
+(begin-tx)
+(let ((r (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 5)))
+  (expect "A-1a the round's worst case stayed inside the cap it opened with" true
+    (<= (+ (btest.vmax (at 'exposure r)) (at 'fee-owed r)) (* 0.05 (at 'avail-at-open r))))
+  (expect "A-1b two boards of 1000 on Punto really did expose 4000" 4000.0 (btest.vmax (at 'exposure r)))
+  (expect "A-1c the cap is measured against the spare pot at open, exactly" 100000.0
+    (at 'avail-at-open r)))
+(commit-tx)
+(env-sigs [])
+
+;; ============================================================================
+;; A-2  ONE BOARD PER ACCOUNT PER ROUND
+;;   A second write would clobber the first board while the round's exposure
+;;   still counted both: the first stake would vanish, unclaimable forever.
+;; ============================================================================
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER btest.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 100000.0)]}])
+(begin-tx)
+(expect-failure "A-2 a second board from the same account in one round is refused"
+  "you already have a board in this round: place every chip in one transaction"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet btest.ALICE (btest.w 0.0 0.0 1.0)))
+(expect "A-2a the first board is intact" 1000.0 (at 'stake (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-board 5 btest.ALICE)))
+(rollback-tx)
+(env-sigs [])
+
+;; ============================================================================
+;; FAIR  WHAT NO KEY CAN CHANGE
+;;   A fairness claim is only real when a named test goes RED without it.
+;; ============================================================================
+(begin-tx)
+;; 🔴 THE PAYTABLE. Per unit staked the gross returns are exactly Punto 2, Banco
+;; 2 - c and Tie 9, and a Tie returns the Punto and Banco stakes.
+(expect "FAIR-1 one unit on each slot at 5%" [2.0 1.95 11.0] (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.board-vector 1.0 1.0 1.0 0.05))
+(expect "FAIR-1a and at 3% only the Banco slot moves" [2.0 1.97 11.0] (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.board-vector 1.0 1.0 1.0 0.03))
+(expect "FAIR-1b Punto alone pays 2 and pushes 1" [2.0 0.0 1.0] (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.board-vector 1.0 0.0 0.0 0.05))
+(expect "FAIR-1c Banco alone pays 2 - c and pushes 1" [0.0 1.95 1.0] (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.board-vector 0.0 1.0 0.0 0.05))
+(expect "FAIR-1d Tie alone pays 9 and nothing else" [0.0 0.0 9.0] (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.board-vector 0.0 0.0 1.0 0.05))
+(expect "FAIR-1e the Tie pays 8 to 1" 8.0 n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.TIE-PAYS)
+(expect "FAIR-1f CONTROL the comparison CAN fail: a 2.0 Banco would not be 1.95" false
+  (= [2.0 2.0 11.0] (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.board-vector 1.0 1.0 1.0 0.05)))
+(commit-tx)
+
+;; A live round keeps every term it opened with; the next round takes the new
+;; commission and cut. Bob opens round 6 under the base table (5%, cut 52, min 1).
+(env-chain-data { "block-time": (time "2026-12-28T00:00:00Z") })
+(env-sigs [{"key":"h0u5e00000000000000000000000000000000000000000000000000000000004"
+           ,"caps":[(coin.TRANSFER "house-funder" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 100000.0)]}])
+(begin-tx) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.fund-house "house-funder" 100000.0) (commit-tx)
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER btest.BOB (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 100000.0)]}])
+(begin-tx)
+(expect "FAIR-3p bob opens round 6" "bet placed in round 6"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet btest.BOB (btest.w 100.0 0.0 0.0)))
+(commit-tx)
+(env-sigs [])
+(begin-tx)
+(let ((r0 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 6)))
+  (env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+  ;; every dial moves, each to a value that is neither its launch nor its base
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.set-params 0.055 5.0 10.0 3600.0 300.0 0.03 100)
+  (env-sigs [])
+  (let ((r1 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 6)) (g (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+    (expect "FAIR-3pre PRECONDITION the setter moved the live commission, cut, minimum and wait"
+      [0.03 100 5.0 300.0] [(at 'commission g) (at 'cut-card g) (at 'min-bet g) (at 'drand-margin g)])
+    (expect "FAIR-3 a live round's closing time is untouched by a param change"
+      (at 'close-time r0) (at 'close-time r1))
+    (expect "FAIR-3a and so is the beacon it is pinned to" (at 'drand-round r0) (at 'drand-round r1))
+    (expect "FAIR-3b and so is the limit it opened under"
+      [(at 'avail-at-open r0) (at 'frac-at-open r0)] [(at 'avail-at-open r1) (at 'frac-at-open r1)])
+    (expect "FAIR-3c and so is what the house owes on every slot" (at 'exposure r0) (at 'exposure r1))
+    (expect "FAIR-3d and so is the table minimum it opened under" 1.0 (at 'min-bet-at-open r1))
+    (expect "FAIR-3d1 and so is the COMMISSION" 0.05 (at 'commission-at-open r1))
+    (expect "FAIR-3d2 and so is the CUT" 52 (at 'cut-at-open r1))
+    ;; the beacon still follows the OLD wait -- computed from its own close-time
+    (expect "FAIR-3g a live round keeps the beacon its own wait pinned, not the new one"
+      (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.round-at (add-time (at 'close-time r0) 120.0))
+      (at 'drand-round r1))
+    (expect "FAIR-3g1 CONTROL the new wait really would have pinned a DIFFERENT beacon" false
+      (= (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.round-at (add-time (at 'close-time r0) 300.0)) (at 'drand-round r1)))
+    ;; 🔴 a board at the round's OWN minimum still enters after the raise to 5.0,
+    ;; and it is priced at the round's 5%, not the live 3%
+    (env-sigs [{"key":"ca40100000000000000000000000000000000000000000000000000000000003"
+               ,"caps":[(coin.TRANSFER btest.CAROL (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 100000.0)]}])
+    (expect "FAIR-3e a board at the round's own minimum still enters the live round"
+      "bet placed in round 6"
+      (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet btest.CAROL (btest.w 0.0 1.0 0.0)))
+    (env-sigs [])
+    (expect "FAIR-3e1 and its Banco unit is added at the round's 5%: 1.95, not 1.97"
+      [200.0 1.95 101.0] (at 'exposure (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 6)))))
+(commit-tx)
+
+;; The live values bind the NEXT round only.
+(env-chain-data { "block-time": (time "2026-12-28T00:10:00Z") })
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER btest.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 100000.0)]}])
+(begin-tx)
+(let ((s0 (at 'round-seq (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params))))
+  (expect-failure "FAIR-3f the raised minimum binds the next round"
+    "total bet below the table minimum"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet btest.ALICE (btest.w 0.0 1.0 0.0)))
+  (expect "FAIR-3f1 and the refusal opened no round" s0 (at 'round-seq (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+  (expect "FAIR-3f2 while a board at the new minimum opens the next round"
+    (format "bet placed in round {}" [(+ s0 1)])
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet btest.ALICE (btest.w 1.0 1.0 3.0)))
+  (let ((rn (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round (+ s0 1))))
+    (expect "FAIR-3h the NEXT round opens under the wait the setter left in force"
+      (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.round-at (add-time (at 'close-time rn) 300.0))
+      (at 'drand-round rn))
+    (expect "FAIR-3h1 CONTROL the old wait would have pinned a DIFFERENT beacon" false
+      (= (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.round-at (add-time (at 'close-time rn) 120.0)) (at 'drand-round rn)))
+    (expect "FAIR-3i the NEXT round takes the new commission and cut"
+      [0.03 100] [(at 'commission-at-open rn) (at 'cut-at-open rn)])
+    (expect "FAIR-3i1 and the new minimum and share" [5.0 0.055]
+      [(at 'min-bet-at-open rn) (at 'frac-at-open rn)])
+    (expect "FAIR-3i2 and closes one NEW window after it opened" (time "2026-12-28T01:10:00Z")
+      (at 'close-time rn))
+    ;; 🔴 FAIR-2, the mechanism half of FAIR-1: every dial just moved, and on a
+    ;; round opened under them Punto still owes 2p and Tie 9t + p + b. Only the
+    ;; Banco slot followed the commission. No setter argument reaches TIE-PAYS
+    ;; or the Punto payout.
+    (expect "FAIR-2 under the moved dials the board 1/1/3 owes [2, 1.97, 29]"
+      [2.0 1.97 29.0] (at 'exposure rn))))
+(rollback-tx)
+(env-sigs [])
+(env-chain-data { "block-time": (time "2026-12-28T00:00:00Z") })
+
+;; ============================================================================
+;; RB  THE LISTING WHOEVER PAYS WINNERS READS FROM
+;;   A caller outside the module cannot read the boards table, so round-boards is
+;;   the only way a helper can find whom to claim for.
+;; ============================================================================
+(begin-tx)
+(let ((accts (lambda (seq:integer)
+               (sort (map (lambda (b:object{n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.board}) (at 'account b))
+                          (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.round-boards seq))))))
+  (expect "RB-1 round 1 lists alice and bob and nothing else" [btest.ALICE btest.BOB] (accts 1))
+  (expect "RB-1a round 6 lists bob and carol and nothing else" [btest.BOB btest.CAROL] (accts 6))
+  (expect "RB-1b each listed board carries its own round number" [6 6]
+    (map (lambda (b:object{n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.board}) (at 'seq b)) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.round-boards 6)))
+  (expect "RB-1c an unknown round lists nothing" [] (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.round-boards 999)))
+(commit-tx)
+
+;; ============================================================================
+;; PIN  THE CONSTANTS, AS LITERALS
+;;   Every one of these is quoted to a player or to the operator. A test that
+;;   reads the constant back cannot see it move; these go red when a constant
+;;   moves without the page, and when the page moves without the constant.
+;; ============================================================================
+(begin-tx)
+(expect "PIN-1 P(Punto)" 0.446246609343596835872549011052 n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.P-PUNTO)
+(expect "PIN-1a P(Banco)" 0.458597422632762972723211503199 n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.P-BANCO)
+(expect "PIN-1b P(Tie)" 0.095155968023640191404239485749 n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.P-TIE)
+(expect "PIN-1c the three probabilities sum to 1 within one unit of the 12th place" true
+  (<= (abs (- (+ n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.P-PUNTO (+ n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.P-BANCO n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.P-TIE)) 1.0)) 0.000000000001))
+(expect "PIN-1d the Punto edge is P(Banco) - P(Punto), rounded to 12" 0.012350813289
+  (round (- 0.458597422633 0.446246609344) 12))
+(expect "PIN-1e and that is the constant" 0.012350813289 n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.PUNTO-EDGE)
+(expect "PIN-1f the Tie edge is 1 - 9 P(Tie)" 0.143596287787 n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.TIE-EDGE)
+(expect "PIN-1g the Banco edge at the launch 5%" 0.010579057842 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.banco-edge 0.05))
+;; the commission floor is the crossing where the Banco edge reaches zero
+(expect "PIN-1h the commission floor" 0.026931711082 n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.MIN-COMMISSION)
+(expect "PIN-1i the Banco edge AT the floor is exactly zero" 0.0 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.banco-edge 0.026931711082))
+;; 🔴 banco-edge ROUNDS to 12 places, so one step under the floor it still reads
+;; 0.0 (the true value is -1.6e-13). The crossing is pinned on the UNROUNDED
+;; edge, and two steps under is the first commission the rounded edge shows
+;; negative.
+(expect "PIN-1j the unrounded edge is non-negative at the floor" true
+  (>= (- n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.P-PUNTO (* (- 1.0 n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.MIN-COMMISSION) n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.P-BANCO)) 0.0))
+(expect "PIN-1k and NEGATIVE one step under it: the floor is the true crossing" true
+  (< (- n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.P-PUNTO (* (- 1.0 (- n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.MIN-COMMISSION 0.000000000001)) n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.P-BANCO)) 0.0))
+(expect "PIN-1l one step under, the floored edge already reads negative" -0.000000000001
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.banco-edge 0.026931711081))
+(expect "PIN-1m two steps under, the rounded edge is negative" true
+  (< (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.banco-edge 0.02693171108) 0.0))
+(expect "PIN-1n the commission ceiling is 100%" 1.0 n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.MAX-COMMISSION)
+(expect "PIN-1o the launch commission is 5%" 0.05 n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.LAUNCH-COMMISSION)
+(expect "PIN-2 the launch share is 0.02" 0.02 n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.LAUNCH-RESERVE-FRACTION)
+(expect "PIN-2a the only bound on the share is the whole spare pot" 1.0 n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.MAX-RESERVE-FRACTION)
+(expect "PIN-2b the launch minimum is 0.01 KDA" 0.01 n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.LAUNCH-MIN-BET)
+(expect "PIN-2c and it can never be set below 0.001 KDA" 0.001 n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.MIN-BET-FLOOR)
+(expect "PIN-2d the launch window is 120 s" 120.0 n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.LAUNCH-BET-WINDOW)
+(expect "PIN-2e the window lies in [30, 3600]" [30.0 3600.0] [n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.MIN-BET-WINDOW n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.MAX-BET-WINDOW])
+(expect "PIN-2f the launch cut is one deck" 52 n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.LAUNCH-CUT)
+(expect "PIN-2g the cut lies in [14, 416]" [14 416] [n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.MIN-CUT n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.MAX-CUT])
+(expect "PIN-2h the bankroll rule is pot/250" 250.0 n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.BANKROLL-DIVISOR)
+(expect "PIN-2i the Tie pays 8 to 1" 8.0 n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.TIE-PAYS)
+(expect "PIN-2j eight decks" 8 n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.DECKS)
+(expect "PIN-2k of 416 cards" 416 n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.SHOE-SIZE)
+(expect "PIN-2l in 52 kinds" 52 n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.KIND-COUNT)
+(expect "PIN-2m a coup draws at most six" 6 n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.CARDS-PER-COUP)
+(expect "PIN-2n the full shoe sums to 416 = 52 x 8" 416 (fold (+) 0 n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.FULL-SHOE))
+(expect "PIN-2o over 52 kinds" 52 (length n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.FULL-SHOE))
+;; pay-banco floors the commissioned part to 12 places:
+;; 7.123456789012 x 0.95 = 6.7672839495614 -> 6.767283949561
+(expect "PIN-2p a 12-decimal Banco stake is floored to 12 places" 13.890740738573
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pay-banco 7.123456789012 0.05))
+(commit-tx)
+
+;; ============================================================================
+;; PIN-K  THE CARDS — cover the SET, not an instance
+;;   KINDS is derived at load from RANKS x SUITS and card-value reads VALUE-OF; the
+;;   expected lists below are written out INDEPENDENTLY, in pool order (index = 4 x rank + suit).
+;; ============================================================================
+(begin-tx)
+(let ((expected-kinds
+        [ "AS" "AH" "AD" "AC" "2S" "2H" "2D" "2C" "3S" "3H" "3D" "3C"
+          "4S" "4H" "4D" "4C" "5S" "5H" "5D" "5C" "6S" "6H" "6D" "6C"
+          "7S" "7H" "7D" "7C" "8S" "8H" "8D" "8C" "9S" "9H" "9D" "9C"
+          "10S" "10H" "10D" "10C" "JS" "JH" "JD" "JC" "QS" "QH" "QD" "QC"
+          "KS" "KH" "KD" "KC" ])
+      (expected-values
+        [ 1 1 1 1 2 2 2 2 3 3 3 3 4 4 4 4 5 5 5 5 6 6 6 6 7 7 7 7 8 8 8 8 9 9 9 9
+          0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 ]))
+  (expect "PIN-K0 CONTROL the independent list itself has 52 entries" 52 (length expected-kinds))
+  (expect "PIN-K the 52 kinds, every rank x suit, in pool order" expected-kinds n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.KINDS)
+  (expect "PIN-K1 and they are 52 DISTINCT names" 52 (length (distinct n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.KINDS)))
+  (expect "PIN-K2 card-value over the 52 kinds gives the values written out" expected-values
+    (map (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.card-value) n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.KINDS))
+  (expect "PIN-K3 CONTROL a table off by one would not" false
+    (= expected-values (map (lambda (k:string) (+ 1 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.card-value k))) n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.KINDS)))
+  (expect "PIN-K4 CONTROL the independent value list has 52 entries" 52 (length expected-values))
+  (expect "PIN-K5 VALUE-OF names every one of the 52 kinds" []
+    (filter (lambda (k:string) (not (contains k n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.VALUE-OF))) expected-kinds))
+  (expect "PIN-K5a and no more" 52 (length n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.VALUE-OF))
+  (expect "PIN-K6 CONTROL a mismatch would show: a King is not worth 10" false
+    (= 10 (at "KS" n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.VALUE-OF))))
+(commit-tx)
+
+;; ============================================================================
+;; PIN-3  VOID-AFTER, probed at both sides of the boundary
+;;   A probe that asked only whether the beacon was yet DUE passed a grace of
+;;   ZERO. Rounds 4, 5 and 6 are still open and void-round settles in round order,
+;;   so they are refunded first -- and the order refusal is pinned on the way.
+;; ============================================================================
+(env-chain-data { "block-time": (time "2027-02-01T00:00:00Z") })
+(env-sigs [{"key":"ca40100000000000000000000000000000000000000000000000000000000003"
+           ,"caps":[(coin.TRANSFER btest.CAROL (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 100000.0)]}])
+(begin-tx)
+(expect "PIN-3p carol opens round 7 at the raised 5 KDA minimum" "bet placed in round 7"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet btest.CAROL (btest.w 10.0 0.0 0.0)))
+(commit-tx)
+(env-sigs [])
+(begin-tx)
+(let ((due (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.time-of-round (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 7)))))
+  ;; one second inside round 7's grace, rounds 4..6 are long past their own
+  (env-chain-data { "block-time": (add-time due (- n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.VOID-AFTER 1.0)) })
+  (expect-failure "V-5 rounds are refunded in order: round 5 waits for round 4"
+    "rounds are settled in order: settle the earlier round first"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.void-round 5))
+  (expect "V-5a round 4 refunds" "round void: every stake is refundable" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.void-round 4))
+  (expect "V-5b then round 5" "round void: every stake is refundable" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.void-round 5))
+  (expect "V-5c then round 6" "round void: every stake is refundable" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.void-round 6))
+  (expect-failure "PIN-3 one second INSIDE the grace, a refund is refused"
+    "the beacon can still be submitted"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.void-round 7))
+  (env-chain-data { "block-time": (add-time due (+ n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.VOID-AFTER 1.0)) })
+  (expect "PIN-3a one second PAST it, the refund opens"
+    "round void: every stake is refundable"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.void-round 7))
+  (expect "PIN-3b and the grace really is ninety days, not zero" 7776000.0 n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.VOID-AFTER))
+(commit-tx)
+
+;; ============================================================================
+;; PIN-4  THE BEACON WAIT
+;;   Three values are quoted -- launch, floor, ceiling -- so all three are
+;;   literals. PIN-4a is the mechanism half, an EQUALITY on purpose: a `>=` gap
+;;   cannot tell a round pinned from the 120 s wait apart from one pinned from
+;;   any larger number.
+;; ============================================================================
+(begin-tx)
+(expect "PIN-4 the launch beacon wait is 120 seconds" 120.0 n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.LAUNCH-DRAND-MARGIN)
+(expect "PIN-4c the wait can never be set below 60 seconds" 60.0 n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.MIN-DRAND-MARGIN)
+(expect "PIN-4d nor above 3600 seconds" 3600.0 n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.MAX-DRAND-MARGIN)
+(let ((r1 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 1)))
+  (expect "PIN-4a round 1 pins exactly round-at(close + 120)"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.round-at (add-time (at 'close-time r1) 120.0))
+    (at 'drand-round r1))
+  (expect "PIN-4a1 which is the beacon the committed signature is for" 20801767
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.round-at (add-time (time "2026-09-20T17:44:13Z") 120.0)))
+  (expect "PIN-4a2 CONTROL a 180 s wait would have pinned a different beacon" false
+    (= (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.round-at (add-time (at 'close-time r1) 180.0)) (at 'drand-round r1))))
+(let* ((close (time "2026-09-20T17:44:13Z"))
+       (dr (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.round-at (add-time close n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.LAUNCH-DRAND-MARGIN)))
+       (gap (diff-time (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.time-of-round dr) close)))
+  (expect "PIN-4b the pinned beacon publishes at least the wait minus one period after close" true
+    (>= gap (- n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.LAUNCH-DRAND-MARGIN 3.0)))
+  (expect "PIN-4b1 and never before the close" true (> gap 0.0)))
+(expect "PIN-4e CONTROL the floor is still above the measured mean block gap" true
+  (> n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.MIN-DRAND-MARGIN 30.03))
+(commit-tx)
+
+;; ============================================================================
+;; COM  THE COMMISSION IS PART OF WHAT THE PLAYER SIGNS
+;;   A board that opens a round takes the live commission, and the house could
+;;   raise the dial between the page and the block. The board's own ceiling
+;;   turns that into a refusal, never a smaller Banker win. A board joining an
+;;   OPEN round is measured against the round's commission, so a dial moved
+;;   after the round opened refuses nobody.
+;; ============================================================================
+(env-chain-data { "block-time": (time "2027-01-05T00:00:00Z") })
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.set-params 0.02 0.01 100000.0 120.0 120.0 0.05 52)
+(commit-tx)
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER "k:b0b0000000000000000000000000000000000000000000000000000000000002" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 10.0)]}])
+(begin-tx)
+(let ((seq0 (at 'round-seq (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params))))
+  (expect-failure "COM-1 a board accepting 4% is refused while the table runs at 5%"
+    "the Banker commission is 0.05, above the 0.04 this board accepts: sign again"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet "k:b0b0000000000000000000000000000000000000000000000000000000000002" { "punto": 0.0, "banco": 10.0, "tie": 0.0, "commission": 0.04 }))
+  (expect "COM-1a and the refusal opened no round" seq0
+    (at 'round-seq (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+  (expect-failure "COM-1b a board with NO Banker stake is held to the same rule"
+    "sign again"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet "k:b0b0000000000000000000000000000000000000000000000000000000000002" { "punto": 10.0, "banco": 0.0, "tie": 0.0, "commission": 0.049999999999 }))
+  (expect "COM-2 a board accepting exactly the live 5% opens the round" true
+    (contains "bet placed" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet "k:b0b0000000000000000000000000000000000000000000000000000000000002" { "punto": 0.0, "banco": 10.0, "tie": 0.0, "commission": 0.05 })))
+  (expect "COM-2a the round opened at 5%" 0.05
+    (at 'commission-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round (+ seq0 1)))))
+(commit-tx)
+;; the dial moves to 10% while that round is open
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.set-params 0.02 0.01 100000.0 120.0 120.0 0.1 52)
+(commit-tx)
+(env-sigs [{"key":"ca40100000000000000000000000000000000000000000000000000000000003"
+           ,"caps":[(coin.TRANSFER "k:ca40100000000000000000000000000000000000000000000000000000000003" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 10.0)]}])
+(begin-tx)
+(let ((cur (at 'current (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params))))
+  (expect "COM-3 PRECONDITION the live dial is now 10%" 0.1
+    (at 'commission (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+  (expect "COM-3a a board accepting 5% still JOINS the open round, measured against the round's 5%" true
+    (contains "bet placed" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet "k:ca40100000000000000000000000000000000000000000000000000000000003" { "punto": 0.0, "banco": 10.0, "tie": 0.0, "commission": 0.05 })))
+  (expect "COM-3b and it is priced at the round's 5%: two Banker 10s expose 39.0" 39.0
+    (at 1 (at 'exposure (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round cur)))))
+(commit-tx)
+;; after the round closes, a board accepting 5% would open a round at 10%: refused
+(env-chain-data { "block-time": (time "2027-01-05T00:02:01Z") })
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER "k:a11ce00000000000000000000000000000000000000000000000000000000001" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 10.0)]}])
+(begin-tx)
+(let ((seq0 (at 'round-seq (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params))))
+  (expect-failure "COM-4 a board accepting 5% is refused when the next round would open at 10%"
+    "the Banker commission is 0.1, above the 0.05 this board accepts: sign again"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet "k:a11ce00000000000000000000000000000000000000000000000000000000001" { "punto": 0.0, "banco": 10.0, "tie": 0.0, "commission": 0.05 }))
+  (expect "COM-4a nothing opened" seq0 (at 'round-seq (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+  (expect "COM-5 a board accepting 10% opens the next round" true
+    (contains "bet placed" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet "k:a11ce00000000000000000000000000000000000000000000000000000000001" { "punto": 0.0, "banco": 10.0, "tie": 0.0, "commission": 0.1 })))
+  (expect "COM-5a which opened at 10%" 0.1
+    (at 'commission-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round (+ seq0 1))))
+  (expect "COM-5b and is priced at 10%: a Banker 10 exposes 19.0" 19.0
+    (at 1 (at 'exposure (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round (+ seq0 1))))))
+(commit-tx)
+(env-sigs [])
+
+(print "baccarat unit tests complete")

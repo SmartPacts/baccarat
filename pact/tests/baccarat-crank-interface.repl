@@ -1,0 +1,120 @@
+;; baccarat-crank-interface.repl — the exports and row fields the shared helper
+;; (ops/crank/game-crank.mjs) relies on, pinned so a second game cannot drift from
+;; the first without a test going red.
+;;
+;; The helper makes exactly these calls and reads exactly these fields:
+;;   get-params        -> round-seq, last-beacon
+;;   get-round seq     -> state, liability, drand-round
+;;   round-boards seq  -> [{account, claimed, ...}]
+;;   resolve seq sig   -> permissionless, one per transaction
+;;   prove-liveness rnd sig
+;;   claim seq account -> pays the board's own account, refuses "nothing to claim"
+;;   pot-status        -> an object (printed whole by the helper's self-test)
+;; The messages the helper branches on are pinned verbatim: a rewording would make
+;; it treat a loser as a transport failure, or a race as a refusal.
+
+(load "baccarat-test-init.repl")
+
+(begin-tx)
+(module ci CG (defcap CG () (enforce true "ok"))
+  (defconst ALICE "k:a11ce00000000000000000000000000000000000000000000000000000000001")
+  (defconst BOB   "k:b0b0000000000000000000000000000000000000000000000000000000000002")
+  (defconst SIG "0d745db068db9e16379a49f65d76353d721d79fb459d20b33a50e750e5cdb10400af36e03d4a8414b3a86770d1d1e90e85462dce40b3cf5c27f9fdb477b6f6e0")
+  ;; a later genuine beacon, for the liveness call
+  (defconst SIG-LATER "19d1a6c9bf554b87d004b73acccad64cc0b4370735b609369f92a9a53e8a07870651464a0b393ef8c607ff05eab5dd7b870ff5dfafda7140e0e2ed10387d3160"))
+(commit-tx)
+
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.initialize n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT 30000.0)
+(commit-tx)
+(env-sigs [{"key":"h0u5e00000000000000000000000000000000000000000000000000000000004"
+           ,"caps":[(coin.TRANSFER "house-funder" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 15000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.fund-house "house-funder" 15000.0)
+(commit-tx)
+(env-sigs [])
+
+;; before any round: what the helper's startup reads
+(begin-tx)
+(let ((g (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+  (expect "CI-1 get-params carries round-seq" true (contains 'round-seq g))
+  (expect "CI-1a and last-beacon" true (contains 'last-beacon g))
+  (expect "CI-1b round-seq starts at 0" 0 (at 'round-seq g))
+  (expect "CI-1c last-beacon starts at 0 -- which the helper reads as always stale" 0 (at 'last-beacon g)))
+(expect "CI-2 pot-status is an object the helper can print whole" true
+  (contains 'available (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)))
+(expect "CI-3 round-boards of an unknown round lists nothing" []
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.round-boards 1))
+(commit-tx)
+
+(env-chain-data { "block-time": (time "2026-09-20T17:42:13Z") })
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER ci.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 100.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet ci.ALICE { "punto": 100.0, "banco": 0.0, "tie": 0.0, "commission": 1.0 })
+(commit-tx)
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER ci.BOB (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 50.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet ci.BOB { "punto": 0.0, "banco": 50.0, "tie": 0.0, "commission": 1.0 })
+(commit-tx)
+(env-sigs [])
+
+;; an open round, as the helper's settle loop reads it
+(begin-tx)
+(let ((r (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 1)))
+  (expect "CI-4 get-round carries state" "open" (at 'state r))
+  (expect "CI-4a and liability" 0.0 (at 'liability r))
+  (expect "CI-4b and drand-round" 20801767 (at 'drand-round r)))
+(expect "CI-5 round-seq advanced" 1 (at 'round-seq (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+(let ((bs (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.round-boards 1)))
+  (expect "CI-6 round-boards lists both boards" 2 (length bs))
+  (expect "CI-6a every board carries account and claimed" []
+    (filter (lambda (b:object) (not (and (contains 'account b) (contains 'claimed b)))) bs))
+  (expect "CI-6b claimed is a bool, false before payment" [false false] (map (at 'claimed) bs)))
+;; the helper's dry run of a claim on an unsettled round: this exact message
+(expect-failure "CI-7 a claim before settlement says so in the words the helper matches"
+  "this round has not been settled yet"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.claim 1 ci.ALICE))
+(commit-tx)
+
+(env-chain-data { "block-time": (time "2026-09-20T17:47:00Z") })
+(begin-tx)
+(expect "CI-8 resolve is permissionless and returns the winner" "punto"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.resolve 1 ci.SIG))
+(let ((r (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 1)))
+  (expect "CI-8a the state the helper switches on" "resolved" (at 'state r))
+  (expect "CI-8b liability > 0 puts the round in the pay set" true (> (at 'liability r) 0.0)))
+(expect "CI-8c last-beacon rose to the round's beacon" 20801767
+  (at 'last-beacon (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+(expect-failure "CI-9 a second resolve is refused" "this round is already settled"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.resolve 1 ci.SIG))
+(commit-tx)
+
+;; the claim dry run, both answers the helper distinguishes
+(begin-tx)
+(expect-failure "CI-10 a loser's dry run says nothing to claim -- the helper's loser memo"
+  "nothing to claim: this board did not win"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.claim 1 ci.BOB))
+(expect "CI-11 a winner's claim pays the BOARD's account whoever sends it" "paid 200.0"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.claim 1 ci.ALICE))
+(expect-failure "CI-11a and a repeat says so in the words the helper matches"
+  "this board has already been claimed"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.claim 1 ci.ALICE))
+(let ((r (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 1)))
+  (expect "CI-11b liability 0 is the helper's done memo" 0.0 (at 'liability r)))
+(expect "CI-11c the paid board reads claimed" true
+  (at 'claimed (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-board 1 ci.ALICE)))
+(commit-tx)
+
+;; liveness, and the race message the helper logs as benign
+(begin-tx)
+(expect "CI-12 prove-liveness records a later beacon" 20802058
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.prove-liveness 20802058 ci.SIG-LATER))
+(expect-failure "CI-12a the loser of a liveness race is told the record is current"
+  "a later beacon is already on record"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.prove-liveness 20802058 ci.SIG-LATER))
+(commit-tx)
+
+(print "crank interface: every export and field the shared helper relies on is present")

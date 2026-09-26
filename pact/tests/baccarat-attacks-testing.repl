@@ -1,0 +1,668 @@
+;; baccarat-attacks-testing.repl — attacks that MUST fail, executed.
+;;
+;; The pot is guarded by this module's own MODULE GUARD, so there is no capability
+;; anyone could compose to reach it: the only route left is the one A-1 takes, a
+;; foreign module transferring straight out of the pot. That is refused by the
+;; guard itself -- the module is not on the caller's stack, so the guard falls
+;; through to module admin -- and the refusal is coin's own guard check.
+;; A-1d is the other half: the SAME transfer, with module admin acquired,
+;; SUCCEEDS. Without it A-1 could not tell "the guard refused it" from "this attack
+;; was never viable", and pre-freeze custody by the admin key would be a claim
+;; rather than a measurement.
+;;
+;; Baccarat adds one thing roulette does not have: a SHOE. Coups draw from a
+;; shared, depleting pool, so the order coups are dealt in decides which cards
+;; each one can see. The SO section pins that the order is the round order and
+;; nothing else, and that neither a resolve nor a refund can jump it.
+
+(load "baccarat-test-init.repl")
+
+(begin-tx)
+(module atk AG (defcap AG () (enforce true "ok"))
+  (defconst ALICE   "k:a11ce00000000000000000000000000000000000000000000000000000000001")
+  (defconst BOBBY   "k:b0b0000000000000000000000000000000000000000000000000000000000002")
+  (defconst MALLORY "k:ca40100000000000000000000000000000000000000000000000000000000003")
+
+  ;; Move the pot straight out, from a FOREIGN module. Nothing is composed or
+  ;; forged: the transfer is attempted and coin enforces the pot's guard.
+  (defun drain:string (to:string amount:decimal)
+    (install-capability (coin.TRANSFER (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) to amount))
+    (coin.transfer (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) to amount))
+
+  ;; There is no internal round machinery to drive: the round opener
+  ;; is inlined in `bet`, and no internal token exists to compose (A-2; the load-level
+  ;; proof is baccarat-open-round-must-fail.repl, which the gate requires to FAIL).
+)
+;; A snapshot store, so every "nothing moved" assertion can be its own top-level
+;; form: several `expect`s inside one `let` print a SINGLE trace line carrying the
+;; last label, and a suite written that way cannot show a NAMED assertion ran.
+(module snap SG (defcap SG () (enforce true "ok"))
+  (defschema s v:string)
+  (deftable t:{s})
+  (defun fmt:string (x) (format "{}" [x]))
+  (defun keep:string (k:string x) (write t k { "v": (fmt x) }))
+  (defun got:string (k:string) (at 'v (read t k))))
+(create-table snap.t)
+
+;; The A-8 probe board, computed from the live round so it cannot pass for the
+;; wrong reason: sized so the FROZEN share refuses it and a DOUBLED share would
+;; not -- aimed at the midpoint of the two caps.
+(module probe PG (defcap PG () (enforce true "ok"))
+  (defun room:decimal (seq:integer)
+    (let* ((r  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round seq))
+           (a0 (at 'avail-at-open r))
+           (av (at 'available (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status))))
+      (if (< av a0) av a0)))
+  (defun used:decimal (seq:integer)
+    (let ((r (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round seq)))
+      (+ (fold (lambda (x:decimal y:decimal) (if (> y x) y x)) 0.0 (at 'exposure r))
+         (at 'fee-owed r))))
+  (defun stake:decimal (seq:integer)
+    (floor (/ (- (* 0.03 (room seq)) (used seq)) 2.05) 12)))
+(commit-tx)
+
+;; ============================================================================
+;; A-7  A STRANGER CANNOT BLOCK DEPLOYMENT BY SQUATTING THE POT'S ACCOUNT
+;;   HOUSE_ACCOUNT is a principal over this module's MODULE GUARD, and a module
+;;   guard is a module name and a label -- so the account name can be built from
+;;   TRANSACTION DATA ALONE, on a chain where the module was never deployed.
+;;   initialize must therefore tolerate a pre-existing row, or it would abort
+;;   forever on that chain. Tolerating it is safe only because coin refuses that
+;;   name to any other guard, which this pins.
+;; ============================================================================
+(env-data { "potg": { "moduleName": { "namespace": "n_48867b242317a0216a67f8c7ca26696b5878e0e3", "name": "baccarat" }
+                    , "name": "baccarat-pot" }
+           , "mine": { "keys": ["ca40100000000000000000000000000000000000000000000000000000000003"], "pred": "keys-all" } })
+(begin-tx)
+(expect "A-7 the pot principal is derivable from tx data by anyone"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account)
+  (create-principal (read-msg "potg")))
+(expect-failure "A-7a but nobody can take that name under their OWN guard"
+  "Reserved protocol guard violation"
+  (coin.create-account (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) (read-keyset "mine")))
+(expect "A-7b a stranger squats it under the module's own guard" "Write succeeded"
+  (coin.create-account (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) (read-msg "potg")))
+(commit-tx)
+
+;; ---- set the table up so there is something worth stealing --------------------
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(expect "A-7c and initialize STILL succeeds over the squatted row" "baccarat initialized"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.initialize n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT 100000.0))
+(commit-tx)
+(env-sigs [{"key":"h0u5e00000000000000000000000000000000000000000000000000000000004"
+           ,"caps":[(coin.TRANSFER "house-funder" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 50000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.fund-house "house-funder" 50000.0)
+(commit-tx)
+(env-sigs [])
+
+;; ============================================================================
+;; A-1  THE POT IS NOT DRAINABLE BY A FOREIGN MODULE
+;;   coin enforces the pot's module guard inside DEBIT; the caller's stack does
+;;   not contain baccarat, so the guard falls through to module admin -- the
+;;   spt-gov keyset. An unsigned stranger fails there. No capability is in the
+;;   path at all, which is the point of the guard choice.
+;; ============================================================================
+(begin-tx)
+(expect "A-1 PRECONDITION the pot really is funded" 50000.0
+  (at 'balance (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)))
+;; 🔴 The refusal is the ENGINE's keyset failure, not a message this module
+;; writes, so no module-unique string exists here; A-1c proves it in state.
+(expect-failure "A-1a a foreign module cannot transfer the pot out"
+  "Keyset failure (keys-all)"
+  (atk.drain atk.MALLORY 50000.0))
+(expect-failure "A-1b nor take a single unit of it" "Keyset failure (keys-all)"
+  (atk.drain atk.MALLORY 0.000000000001))
+(expect "A-1c the pot is untouched" 50000.0
+  (at 'balance (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)))
+(commit-tx)
+
+;; ---------------------------------------------------------------------------
+;; A-1d  THE SAME TRANSFER, WITH MODULE ADMIN, SUCCEEDS -- AND THAT IS CUSTODY
+;;   The open direction of A-1: the refusal above is the guard, not an attack
+;;   that could never work. Until the freeze the admin keyset is module
+;;   governance and satisfies the pot's guard from anywhere. Rolled back.
+;; ---------------------------------------------------------------------------
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(acquire-module-admin n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat)
+(expect "A-1d PRECONDITION the caller holds her starting 100,000" 100000.0
+  (coin.get-balance atk.MALLORY))
+(expect "A-1d1 with module admin the SAME drain moves the whole pot" "Write succeeded"
+  (atk.drain atk.MALLORY 50000.0))
+(expect "A-1d2 and the pot is empty" 0.0
+  (coin.get-balance (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account)))
+(expect "A-1d3 and the caller took all of it" 150000.0
+  (coin.get-balance atk.MALLORY))
+(rollback-tx)
+(env-sigs [])
+(begin-tx)
+(expect "A-1d4 the rollback left the pot where it was" 50000.0
+  (at 'balance (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)))
+(commit-tx)
+
+;; ============================================================================
+;; A-2  THERE IS NO INTERNAL ROUND MACHINERY TO REACH
+;;   Before deployment a separate `open-round` export, gated by the true-bodied
+;;   PRIVATE token, opened rounds. Pact has no `private`: an export is a door, and
+;;   the only door that cannot be opened by the wrong caller is one that does not
+;;   exist. The opener is now INLINED in `bet`: a round opens only when a board arrives, and the
+;;   module defines no export a forger could name. The source is read here; the
+;;   load-level proof (a module naming the old export FAILS to load with "has no
+;;   such member") is baccarat-open-round-must-fail.repl, required by the gate.
+;; ============================================================================
+(begin-tx)
+(expect "A-2 the module defines no open-round export" false
+  (contains "(defun open-round" (at 'code (describe-module "n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat"))))
+(expect "A-2a CONTROL the same read does see the exports that exist" true
+  (contains "(defun bet:string" (at 'code (describe-module "n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat"))))
+(expect "A-2b no round exists before the first board" 0
+  (at 'current (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+(commit-tx)
+
+;; ============================================================================
+;; A-3  WHAT *IS* PERMISSIONLESS STAYS SAFE
+;;   resolve and claim are open to anyone. Being open buys the caller nothing:
+;;   the cards come from the beacon and the round key, and a claim always pays
+;;   the board's own account.
+;; ============================================================================
+(env-chain-data { "block-time": (time "2026-09-20T17:42:13Z") })
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER atk.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 1000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet atk.ALICE { "punto": 100.0, "banco": 0.0, "tie": 0.0, "commission": 1.0 })
+(commit-tx)
+(env-sigs [])
+
+(env-chain-data { "block-time": (time "2026-09-20T17:47:00Z") })
+(begin-tx)
+(expect "A-3 PRECONDITION round 1 pins the beacon the bet time names" 20801767
+  (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 1)))
+;; mallory resolves the round: permissionless, and she gains nothing by it
+(expect "A-3a anyone may resolve, and the cards are not theirs to choose" "punto"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.resolve 1 "0d745db068db9e16379a49f65d76353d721d79fb459d20b33a50e750e5cdb10400af36e03d4a8414b3a86770d1d1e90e85462dce40b3cf5c27f9fdb477b6f6e0"))
+(expect "A-3b the hands are the ones the beacon dealt" ["3H" "4C"]
+  (at 'punto (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 1)))
+(expect "A-3b1 banker's hand likewise" ["QC" "10C" "3S"]
+  (at 'banco (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 1)))
+(commit-tx)
+
+(begin-tx)
+(expect "A-3c PRECONDITION mallory holds her starting 100,000" 100000.0
+  (coin.get-balance atk.MALLORY))
+;; mallory cranks alice's claim. It pays ALICE.
+(expect "A-3c1 mallory cranks alice's claim: it pays the board's 200" "paid 200.0"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.claim 1 atk.ALICE))
+(expect "A-3c2 cranking someone else's claim pays THEM, not the caller" 100000.0
+  (coin.get-balance atk.MALLORY))
+(expect "A-3d alice was paid her win: 100,000 - 100 + 200" 100100.0
+  (coin.get-balance atk.ALICE))
+(expect-failure "A-3e and mallory cannot claim a board she never placed" "No value found"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.claim 1 atk.MALLORY))
+(commit-tx)
+
+;; ============================================================================
+;; A-4  SIGNATURE MALLEABILITY -- refused end to end
+;;   A 32-byte coordinate holds values to 2^256-1 while the field modulus is
+;;   ~2^254, and the pairing native reduces mod P, so x, x+P, x+2P are the SAME
+;;   point and all would verify. A seed built from the raw integers would let a
+;;   resolver pick among up to 25 decks' worth of deals after betting. The
+;;   verifier refuses every non-canonical encoding; the genuine one still deals.
+;;   Round 2 pins the SAME beacon as round 1 on purpose: SO-5 shows why that
+;;   beacon cannot reproduce round 1's cards.
+;; ============================================================================
+(begin-tx)
+(module mall MG (defcap MG () (enforce true "ok"))
+  (defconst P:integer 21888242871839275222246405745257275088696311157297823662689037894645226208583)
+  (defconst SIG "0d745db068db9e16379a49f65d76353d721d79fb459d20b33a50e750e5cdb10400af36e03d4a8414b3a86770d1d1e90e85462dce40b3cf5c27f9fdb477b6f6e0")
+  (defconst X:integer (str-to-int 16 (take 64 SIG)))
+  (defconst Y:integer (str-to-int 16 (drop 64 SIG)))
+  (defun hex64:string (v:integer)
+    (let ((h (int-to-str 16 v)))
+      (+ (take (- 64 (length h)) "0000000000000000000000000000000000000000000000000000000000000000") h)))
+  (defun enc:string (kx:integer ky:integer) (+ (hex64 (+ X (* kx P))) (hex64 (+ Y (* ky P))))))
+(commit-tx)
+
+(env-chain-data { "block-time": (time "2026-09-20T17:42:13Z") })
+(env-sigs [{"key":"ca40100000000000000000000000000000000000000000000000000000000003"
+           ,"caps":[(coin.TRANSFER atk.MALLORY (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 100.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet atk.MALLORY { "punto": 0.0, "banco": 0.0, "tie": 10.0, "commission": 1.0 })
+(commit-tx)
+(env-sigs [])
+(env-chain-data { "block-time": (time "2026-09-20T17:47:00Z") })
+(begin-tx)
+(expect "A-4 PRECONDITION round 2 pins the same beacon as round 1" 20801767
+  (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 2)))
+(expect-failure "A-4a a re-encoded beacon (x+P) cannot be used to pick the cards"
+  "G1 coordinates must be canonical" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.resolve 2 (mall.enc 1 0)))
+(expect-failure "A-4b nor (y+P)"
+  "G1 coordinates must be canonical" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.resolve 2 (mall.enc 0 1)))
+(expect-failure "A-4c nor both shifted"
+  "G1 coordinates must be canonical" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.resolve 2 (mall.enc 2 3)))
+(expect-failure "A-4d nor the largest reachable shift"
+  "G1 coordinates must be canonical" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.resolve 2 (mall.enc 4 4)))
+(expect "A-4e the refusals left round 2 open" "open" (at 'state (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 2)))
+(commit-tx)
+(begin-tx)
+;; CONTROL: the genuine encoding of the same beacon still settles the round, so
+;; the refusals above are about canonicality and not a broken fixture.
+(expect "A-4f CONTROL the canonical beacon still resolves" "banco"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.resolve 2 mall.SIG))
+(expect-failure "A-4g and the Tie mallory bet on did NOT come up" "nothing to claim"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.claim 2 atk.MALLORY))
+(commit-tx)
+
+;; ============================================================================
+;; SO-5  THE SEED BINDS THE ROUND
+;;   Rounds 1 and 2 were dealt from the SAME genuine beacon. The seed is
+;;   domain-separated by the round key, so a beacon reused on another round
+;;   draws different cards: a resolver cannot carry a known deal across rounds.
+;; ============================================================================
+(begin-tx)
+(expect "SO-5 the same beacon gives round 1 and round 2 different seeds" false
+  (= (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verified-seed "baccarat|1" 20801767 "0d745db068db9e16379a49f65d76353d721d79fb459d20b33a50e750e5cdb10400af36e03d4a8414b3a86770d1d1e90e85462dce40b3cf5c27f9fdb477b6f6e0")
+     (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verified-seed "baccarat|2" 20801767 "0d745db068db9e16379a49f65d76353d721d79fb459d20b33a50e750e5cdb10400af36e03d4a8414b3a86770d1d1e90e85462dce40b3cf5c27f9fdb477b6f6e0")))
+(expect "SO-5a CONTROL the same round key and beacon give the same seed twice" true
+  (= (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verified-seed "baccarat|1" 20801767 "0d745db068db9e16379a49f65d76353d721d79fb459d20b33a50e750e5cdb10400af36e03d4a8414b3a86770d1d1e90e85462dce40b3cf5c27f9fdb477b6f6e0")
+     (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verified-seed "baccarat|1" 20801767 "0d745db068db9e16379a49f65d76353d721d79fb459d20b33a50e750e5cdb10400af36e03d4a8414b3a86770d1d1e90e85462dce40b3cf5c27f9fdb477b6f6e0")))
+(expect "SO-5b and from one fresh shoe the two seeds draw different cards" false
+  (= (at 'cards (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.draw-cards (make-list 52 8) 416 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verified-seed "baccarat|1" 20801767 "0d745db068db9e16379a49f65d76353d721d79fb459d20b33a50e750e5cdb10400af36e03d4a8414b3a86770d1d1e90e85462dce40b3cf5c27f9fdb477b6f6e0")))
+     (at 'cards (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.draw-cards (make-list 52 8) 416 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verified-seed "baccarat|2" 20801767 "0d745db068db9e16379a49f65d76353d721d79fb459d20b33a50e750e5cdb10400af36e03d4a8414b3a86770d1d1e90e85462dce40b3cf5c27f9fdb477b6f6e0")))))
+(commit-tx)
+
+;; ============================================================================
+;; SO-6  THE DEAL HELPERS ARE PURE AND OPEN TO ANYONE
+;;   draw-cards, coup-from-cards, kind-at, adjust and restore are public exports
+;;   (Pact has no private). Called here with no signature and no capability, they
+;;   compute and return; none of them reads or writes a table or moves a coin.
+;;   SO-6a is also what lets anyone check a coup: round 1's hands recomputed from
+;;   its seed off-chain, card for card.
+;; ============================================================================
+(begin-tx)
+(snap.keep "pot" (coin.get-balance (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account)))
+(snap.keep "shoe" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status))
+(snap.keep "game" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params))
+(commit-tx)
+(begin-tx)
+(expect "SO-6 draw-cards on a fresh shoe deals round 1's first five cards"
+  ["3H" "QC" "4C" "10C" "3S"]
+  (take 5 (at 'cards (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.draw-cards (make-list 52 8) 416 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.verified-seed "baccarat|1" 20801767 "0d745db068db9e16379a49f65d76353d721d79fb459d20b33a50e750e5cdb10400af36e03d4a8414b3a86770d1d1e90e85462dce40b3cf5c27f9fdb477b6f6e0")))))
+(expect "SO-6a coup-from-cards deals the tableau off those cards"
+  { "winner": "punto", "punto": ["3H" "4C"], "banco": ["QC" "10C" "3S"], "used": 5 }
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.coup-from-cards ["3H" "QC" "4C" "10C" "3S" "AS"]))
+(expect "SO-6b kind-at index 0 of a full shoe is the first kind" 0 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.kind-at (make-list 52 8) 0))
+(expect "SO-6c kind-at index 8 is the second kind" 1 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.kind-at (make-list 52 8) 8))
+(expect "SO-6d kind-at the last card is the last kind" 51 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.kind-at (make-list 52 8) 415))
+(expect "SO-6e adjust removes one of a kind" [7 8 8] (take 3 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.adjust (make-list 52 8) 0 -1)))
+(expect "SO-6f restore puts cards back" [9 10 8] (take 3 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.restore (make-list 52 8) [0 1 1])))
+(expect "SO-6g the pot did not move" (snap.got "pot") (snap.fmt (coin.get-balance (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account))))
+(expect "SO-6h the shoe did not move" (snap.got "shoe") (snap.fmt (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status)))
+(expect "SO-6i the game row did not move" (snap.got "game") (snap.fmt (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+(commit-tx)
+
+;; ============================================================================
+;; A-5 / SO-1..SO-3  A LOSER CANNOT WAIT OUT THE CLOCK, AND NOBODY CAN JUMP THE SHOE
+;;   drand is public: a player can compute the outcome off-chain the moment the
+;;   beacon exists. If a refund needed only elapsed time, every loser would
+;;   decline to resolve and void after the grace. The refund therefore needs
+;;   on-chain EVIDENCE that drand went away.
+;;   Shape: round X pins 20801767, a LATER round Y pins 20802058. In roulette Y
+;;   could be resolved first; here it CANNOT -- coups are dealt in round order,
+;;   so the pool each coup draws from never depends on who settled first. The
+;;   evidence comes from prove-liveness with Y's beacon instead, and X then can
+;;   neither be refunded nor skipped.
+;; ============================================================================
+(env-chain-data { "block-time": (time "2026-09-20T17:42:13Z") })
+(env-sigs [{"key":"ca40100000000000000000000000000000000000000000000000000000000003"
+           ,"caps":[(coin.TRANSFER atk.MALLORY (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 100.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet atk.MALLORY { "punto": 0.0, "banco": 0.0, "tie": 10.0, "commission": 1.0 })                                            ; round X = 3
+(commit-tx)
+(env-chain-data { "block-time": (time "2026-09-20T17:56:46Z") })
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER atk.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 100.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet atk.ALICE { "punto": 10.0, "banco": 0.0, "tie": 0.0, "commission": 1.0 })          ; round Y = 4
+(commit-tx)
+(env-sigs [])
+
+(begin-tx)
+(expect "A-5 round X pins the earlier beacon" 20801767 (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 3)))
+(expect "A-5a round Y pins a LATER one" 20802058 (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 4)))
+(expect "A-5a1 the shoe stands after round 2" 2 (at 'shoe-seq (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status)))
+(commit-tx)
+
+;; ---- SO-1  resolving the later round first is refused and writes nothing -----
+;; Checked INSIDE the transaction, after the refusal: a REPL expect-failure leaks
+;; partial writes, so equality here proves nothing was written before the abort.
+(env-chain-data { "block-time": (time "2026-09-20T18:01:00Z") })
+(begin-tx)
+(snap.keep "shoe" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status))
+(snap.keep "reserved" (at 'reserved (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+(snap.keep "y" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 4))
+(commit-tx)
+(begin-tx)
+(expect-failure "SO-1 resolving round Y before round X is refused"
+  "coups are dealt in round order: settle the earlier round first"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.resolve 4 "19d1a6c9bf554b87d004b73acccad64cc0b4370735b609369f92a9a53e8a07870651464a0b393ef8c607ff05eab5dd7b870ff5dfafda7140e0e2ed10387d3160"))
+(expect "SO-1a round Y is still open" "open" (at 'state (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 4)))
+(expect "SO-1b round Y's row is unchanged" (snap.got "y") (snap.fmt (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 4)))
+(expect "SO-1c the shoe row is unchanged" (snap.got "shoe") (snap.fmt (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status)))
+(expect "SO-1d reserved is unchanged" (snap.got "reserved") (snap.fmt (at 'reserved (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params))))
+(rollback-tx)
+
+;; ---------------------------------------------------------------------------
+;; A-6  ONE RESOLVE PER TRANSACTION -- an operational constraint, pinned so a
+;;   crank author meets it here and not in production. Every resolve installs
+;;   coin.TRANSFER from the pot to the SAME revenue account, and Pact 5's
+;;   duplicate-install identity excludes the amount, so the second install in one
+;;   transaction collides. X then Y is the in-order pair, so the refusal is the
+;;   install and not the shoe order.
+;; ---------------------------------------------------------------------------
+(begin-tx)
+(expect-failure "A-6 two rounds cannot be resolved in one transaction"
+  "Capability already installed"
+  [ (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.resolve 3 "0d745db068db9e16379a49f65d76353d721d79fb459d20b33a50e750e5cdb10400af36e03d4a8414b3a86770d1d1e90e85462dce40b3cf5c27f9fdb477b6f6e0")
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.resolve 4 "19d1a6c9bf554b87d004b73acccad64cc0b4370735b609369f92a9a53e8a07870651464a0b393ef8c607ff05eab5dd7b870ff5dfafda7140e0e2ed10387d3160") ])
+;; 🔴 rollback-tx: X resolved before Y's install collided, and a REPL
+;; expect-failure leaks those writes through a commit.
+(rollback-tx)
+(begin-tx)
+(expect "A-6a the failed batch left round X open" "open" (at 'state (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 3)))
+(expect "A-6b and round Y open" "open" (at 'state (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 4)))
+(commit-tx)
+
+;; ---- ninety days on: nobody has resolved anything -----------------------------
+(env-chain-data { "block-time": (time "2027-01-05T00:00:00Z") })
+
+;; ---- SO-2  voiding the later round first is refused ---------------------------
+;; Y's beacon is ABOVE the record and its grace has elapsed, so the only thing
+;; left to refuse it is the order.
+(begin-tx)
+(expect "SO-2 PRECONDITION the record is below Y's beacon" true
+  (< (at 'last-beacon (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)) (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 4))))
+(expect-failure "SO-2a voiding round Y before round X is refused"
+  "rounds are settled in order: settle the earlier round first"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.void-round 4))
+(expect "SO-2b round Y is still open" "open" (at 'state (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 4)))
+(expect "SO-2c and the shoe still stands after round 2" 2 (at 'shoe-seq (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status)))
+(rollback-tx)
+
+;; ---- the evidence: Y's beacon proven without settling anything ---------------
+(begin-tx)
+(expect "A-5b prove-liveness with Y's beacon raises the record past X's" 20802058
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.prove-liveness 20802058 "19d1a6c9bf554b87d004b73acccad64cc0b4370735b609369f92a9a53e8a07870651464a0b393ef8c607ff05eab5dd7b870ff5dfafda7140e0e2ed10387d3160"))
+(expect "A-5b1 and Y is still open: it settled nothing" "open" (at 'state (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 4)))
+(commit-tx)
+
+(begin-tx)
+(expect-failure "A-5c waiting out the grace does NOT buy X a refund"
+  "drand has been seen since this round"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.void-round 3))
+(rollback-tx)
+(begin-tx)
+(expect-failure "A-5c1 nor can Y be refunded to jump past X"
+  "drand has been seen since this round"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.void-round 4))
+(rollback-tx)
+(begin-tx)
+(expect-failure "A-5c2 nor can Y be dealt ahead of X"
+  "coups are dealt in round order: settle the earlier round first"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.resolve 4 "19d1a6c9bf554b87d004b73acccad64cc0b4370735b609369f92a9a53e8a07870651464a0b393ef8c607ff05eab5dd7b870ff5dfafda7140e0e2ed10387d3160"))
+(rollback-tx)
+
+(begin-tx)
+(expect "A-5d round X is still open, and still resolvable" "open" (at 'state (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 3)))
+;; it settles from its OWN beacon months late with the same answer it always had
+(expect "A-5e X resolves from its own genuine beacon, months late" "banco"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.resolve 3 "0d745db068db9e16379a49f65d76353d721d79fb459d20b33a50e750e5cdb10400af36e03d4a8414b3a86770d1d1e90e85462dce40b3cf5c27f9fdb477b6f6e0"))
+(expect-failure "A-5f and mallory's board still did not win" "nothing to claim"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.claim 3 atk.MALLORY))
+(commit-tx)
+
+;; ---- SO-3  once X is dealt, Y deals, and the shoe advances in order ----------
+(begin-tx)
+(expect "SO-3 after X the shoe stands after X" 3 (at 'shoe-seq (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status)))
+(expect "SO-3a Y now resolves" "punto" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.resolve 4 "19d1a6c9bf554b87d004b73acccad64cc0b4370735b609369f92a9a53e8a07870651464a0b393ef8c607ff05eab5dd7b870ff5dfafda7140e0e2ed10387d3160"))
+(expect "SO-3b and the shoe stands after Y" 4 (at 'shoe-seq (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status)))
+;; CONTROL for SO-1c: the same snapshot comparison DOES see a shoe that moved,
+;; so its equality above was a measurement, not a comparison that cannot fail.
+(expect "SO-3c CONTROL the SO-1 snapshot differs from the shoe once coups are dealt" false
+  (= (snap.got "shoe") (snap.fmt (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status))))
+(commit-tx)
+
+;; ============================================================================
+;; A-5g  THE RECORD IS A HIGH-WATER MARK, NOT THE LAST BEACON SEEN
+;;   X was settled from a beacon OLDER than the record. `resolve` writes
+;;   max(beacon, record); writing the beacon itself would walk the record
+;;   BACKWARDS and make every pending round between the two refundable.
+;; ============================================================================
+(begin-tx)
+(expect "A-5g settling an OLDER round does not walk the record backwards" 20802058
+  (at 'last-beacon (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+(commit-tx)
+
+;; Two pending rounds, straddling the record: W's beacon BELOW it, Z's one round
+;; ABOVE. Both open from a chain time in their beacon's own window, so the grace
+;; below is genuinely elapsed for each.
+(env-chain-data { "block-time": (time "2026-09-20T17:42:16Z") })
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER atk.BOBBY (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 100.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet atk.BOBBY { "punto": 0.0, "banco": 10.0, "tie": 0.0, "commission": 1.0 })           ; round W = 5
+(commit-tx)
+(env-chain-data { "block-time": (time "2026-09-20T17:56:49Z") })
+(env-sigs [{"key":"ca40100000000000000000000000000000000000000000000000000000000003"
+           ,"caps":[(coin.TRANSFER atk.MALLORY (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 100.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet atk.MALLORY { "punto": 10.0, "banco": 0.0, "tie": 0.0, "commission": 1.0 })         ; round Z = 6
+(commit-tx)
+(env-sigs [])
+(begin-tx)
+(expect "A-5h W pins a beacon BELOW the record" 20801768 (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 5)))
+(expect "A-5i Z pins the very next beacon ABOVE the record" 20802059 (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 6)))
+(commit-tx)
+
+(env-chain-data { "block-time": (time "2027-01-05T00:00:00Z") })
+(begin-tx)
+(expect "A-5j1 CONTROL the grace has genuinely elapsed for W, so time is not what refuses it" true
+  (> (diff-time (at 'block-time (chain-data))
+                (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.time-of-round (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 5))))
+     n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.VOID-AFTER))
+(expect-failure "A-5k W's beacon is BELOW the record, so it must be resolved, not refunded"
+  "drand has been seen since this round"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.void-round 5))
+(rollback-tx)
+(begin-tx)
+(expect "A-5k1 W resolves from its own beacon" "banco" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.resolve 5 "3046d0014da5e70c6a4c99fc5fafde0cc68ae79d82ece3177dc7d6147945cfb502d3ce355c42c98368f003bf089aebb110ee7119f62d6402a2187d58f44f297a"))
+(expect "A-5k2 and the record did not walk back to W's beacon" 20802058
+  (at 'last-beacon (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+(commit-tx)
+
+;; ---- A-5j / SO-4  the OPEN direction: Z, one beacon above the record, refunds --
+;; Z differs from W in exactly one number, and with everything else identical
+;; the refund succeeds. SO-4 rides on it: a void takes the round's turn in the
+;; shoe and deals nothing. Rolled back: Z is needed intact below.
+(begin-tx)
+(snap.keep "counts" (at 'counts (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status)))
+(snap.keep "remaining" (at 'remaining (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status)))
+(snap.keep "shoe-no" (at 'shoe-no (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status)))
+(snap.keep "dealt-since" (at 'dealt-since (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status)))
+(commit-tx)
+(begin-tx)
+(expect "SO-4 PRECONDITION the shoe stands after W" 5 (at 'shoe-seq (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status)))
+(expect "A-5j CONTROL a round whose beacon is above the record DOES refund"
+  "round void: every stake is refundable"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.void-round 6))
+(expect "SO-4a the void advanced shoe-seq to Z" 6 (at 'shoe-seq (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status)))
+(expect "SO-4b without touching the counts" (snap.got "counts") (snap.fmt (at 'counts (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status))))
+(expect "SO-4c or the cards remaining" (snap.got "remaining") (snap.fmt (at 'remaining (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status))))
+(expect "SO-4d or the shoe number" (snap.got "shoe-no") (snap.fmt (at 'shoe-no (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status))))
+(expect "SO-4e or the coups dealt from this shoe" (snap.got "dealt-since") (snap.fmt (at 'dealt-since (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status))))
+(rollback-tx)
+
+;; ============================================================================
+;; A-5l  THE BOUNDARY: THE RECORD EXACTLY AT THE ROUND'S OWN BEACON
+;;   At equality drand demonstrably published THIS round's beacon, so the round
+;;   is settleable and a refund is the wrong answer; relaxing `<` to `<=` would
+;;   hand a loser their stake back on the one beacon that proves they lost.
+;;   A-5j is the open direction for this: the same call succeeded one below.
+;; ============================================================================
+(begin-tx)
+(expect "A-5l proving Z's OWN beacon puts the record exactly AT it" 20802059
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.prove-liveness 20802059 "090610f4d8155e4d56b23988d4f0a0451e42a3cc2c296cf4bc98f5f3bbfed1a811d2467d48083eabef7f856e0e9198166abc9a67de356bee250adf30d4a3c5c7"))
+(expect "A-5m the record and Z's own beacon are now the same number" true
+  (= (at 'last-beacon (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)) (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 6))))
+(commit-tx)
+(begin-tx)
+(expect-failure "A-5n at record == beacon the refund is refused"
+  "drand has been seen since this round"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.void-round 6))
+(rollback-tx)
+(begin-tx)
+(expect "A-5o Z resolves from its own beacon" "banco" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.resolve 6 "090610f4d8155e4d56b23988d4f0a0451e42a3cc2c296cf4bc98f5f3bbfed1a811d2467d48083eabef7f856e0e9198166abc9a67de356bee250adf30d4a3c5c7"))
+(commit-tx)
+
+;; ============================================================================
+;; A-8  set-params CANNOT WIDEN A ROUND THAT ALREADY HAS BETS IN IT
+;;   The cap is frac x min(avail-at-open, available). Both the fraction and the
+;;   pot at open are frozen on the round, so doubling the dial mid-round widens
+;;   nothing.
+;; ============================================================================
+(env-chain-data { "block-time": (time "2027-01-10T00:00:00Z") })
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER atk.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 100000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet atk.ALICE { "punto": 200.0, "banco": 0.0, "tie": 0.0, "commission": 1.0 })         ; round 7
+(commit-tx)
+(env-sigs [])
+(begin-tx)
+(expect "A-8 the round recorded the fraction in force when it opened" 0.02
+  (at 'frac-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 7)))
+(expect "A-8 PRECONDITION round 7 opened at the launch commission" 0.05
+  (at 'commission-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 7)))
+(expect "A-8 PRECONDITION and the launch cut" 52 (at 'cut-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 7)))
+(commit-tx)
+;; admin doubles the share AND moves the commission and the cut (D-1 below)
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.set-params 0.04 0.01 100000.0 120.0 120.0 0.1 100)
+(commit-tx)
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER atk.BOBBY (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 100000.0)]}])
+(begin-tx)
+(expect "A-8a the LIVE round still enforces the fraction it opened under" 0.02
+  (at 'frac-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 7)))
+(expect "A-8a1 while the row now holds the doubled one" 0.04
+  (at 'reserve-fraction (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+(expect "A-8a2 the probe board really is inside the DOUBLED cap" true
+  (< (+ (probe.used 7) (* 2.05 (probe.stake 7))) (* 0.04 (probe.room 7))))
+(expect "A-8a3 and really is outside the FROZEN one" true
+  (> (+ (probe.used 7) (* 2.0 (probe.stake 7))) (* 0.02 (probe.room 7))))
+(expect-failure "A-8b so a board the doubled fraction would allow is still refused"
+  "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet atk.BOBBY { "punto": (probe.stake 7), "banco": 0.0, "tie": 0.0, "commission": 1.0 }))
+(rollback-tx)
+
+;; ============================================================================
+;; D-1  THE OPEN ROUND KEEPS ITS COMMISSION AND ITS CUT
+;;   The dials above moved the commission 0.05 -> 0.1 and the cut 52 -> 100
+;;   while round 7 was still taking bets. A Banker board joining round 7 must be
+;;   priced at 0.05, and round 7 must deal against the cut it opened under; the
+;;   NEXT round takes the new values.
+;; ============================================================================
+(env-chain-data { "block-time": (time "2027-01-10T00:01:00Z") })
+(begin-tx)
+(expect "D-1 the open round's commission did not move" 0.05
+  (at 'commission-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 7)))
+(expect "D-1a nor its cut" 52 (at 'cut-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 7)))
+(expect "D-1b and what the table advertises for it is the round's commission" 0.05
+  (at 'commission (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)))
+(expect "D-1c while the row holds the new ones" 0.1 (at 'commission (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+(commit-tx)
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet atk.BOBBY { "punto": 0.0, "banco": 10.0, "tie": 0.0, "commission": 1.0 })            ; joins round 7
+(expect "D-1d a Banker board joining round 7 is priced at 0.05: 10 + 9.5" [400.0 19.5 210.0]
+  (at 'exposure (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 7)))
+(expect "D-1e CONTROL at the new commission the same board would owe 19.0" 19.0
+  (at 1 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.board-vector 0.0 10.0 0.0 0.1)))
+(commit-tx)
+(env-sigs [])
+
+(env-chain-data { "block-time": (time "2027-01-10T00:05:00Z") })
+(env-sigs [{"key":"ca40100000000000000000000000000000000000000000000000000000000003"
+           ,"caps":[(coin.TRANSFER atk.MALLORY (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 100.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet atk.MALLORY { "punto": 1.0, "banco": 0.0, "tie": 0.0, "commission": 1.0 })          ; round 8
+(commit-tx)
+(env-sigs [])
+(begin-tx)
+(expect "D-1f the NEXT round opened is round 8" 8 (at 'current (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+(expect "D-1g and takes the new commission" 0.1 (at 'commission-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 8)))
+(expect "D-1h and the new cut" 100 (at 'cut-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 8)))
+(expect "D-1i and the new share" 0.04 (at 'frac-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 8)))
+(commit-tx)
+
+;; ============================================================================
+;; D-2  NOBODY CAN PICK THE COMMISSION OR THE CUT
+;;   D-1f..D-1h showed the NEXT round took the row's new commission and cut. The
+;;   only way a round opens is a board, and a board carries three stakes and a
+;;   commission CEILING: a board that tries to hand in a commission, a cut or a
+;;   round number is refused by the engine before a line of the module runs, and
+;;   opens nothing. (The wording is the engine's; the label identifies the test.)
+;; ============================================================================
+(env-chain-data { "block-time": (time "2027-01-10T00:10:00Z") })
+(env-sigs [{"key":"ca40100000000000000000000000000000000000000000000000000000000003"
+           ,"caps":[(coin.TRANSFER atk.MALLORY (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 100.0)]}])
+(begin-tx)
+(expect "D-2 PRECONDITION round 8 is the last opened" 8 (at 'round-seq (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+(expect-failure "D-2a a board carrying a cut is refused before the module runs"
+  "expected type object{n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.wager}"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet atk.MALLORY { "punto": 1.0, "banco": 0.0, "tie": 0.0, "commission": 1.0, "cut-card": 26 }))
+(expect-failure "D-2b a board carrying a round number likewise"
+  "expected type object{n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.wager}"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet atk.MALLORY { "punto": 1.0, "banco": 0.0, "tie": 0.0, "commission": 1.0, "seq": 9 }))
+(expect "D-2c and nothing opened" 8 (at 'round-seq (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+(rollback-tx)
+(env-sigs [])
+
+;; ============================================================================
+;; A-9  PROVE-LIVENESS -- anyone can show drand is alive without settling anything
+;;   Without it "drand went away" is indistinguishable from "nobody settled this
+;;   round", and the second is a loser's own choice.
+;; ============================================================================
+(begin-tx)
+(expect "A-9 PRECONDITION the record stands at Z's beacon" 20802059
+  (at 'last-beacon (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+(snap.keep "pot" (coin.get-balance (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account)))
+(snap.keep "shoe" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status))
+(commit-tx)
+(begin-tx)
+(expect "A-9a a genuine beacon raises the record, settling nothing" 20802172
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.prove-liveness 20802172 "1f5b04f99e8ed51bbe06ffd960a7e6e421465bd5e0e873aade49e236a3131f06000addb82c5de70f69d0305dbb2a99d88da2d527bdd7ce9fd307263727445361"))
+(expect "A-9b the record moved forward to it" 20802172
+  (at 'last-beacon (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+(expect "A-9c and NOT ONE KDA moved" (snap.got "pot") (snap.fmt (coin.get-balance (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account))))
+(expect "A-9d and no card was dealt" (snap.got "shoe") (snap.fmt (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status)))
+(commit-tx)
+(begin-tx)
+(expect-failure "A-9e a forged beacon proves nothing" "drand signature does not verify"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.prove-liveness 20802173 "1f5b04f99e8ed51bbe06ffd960a7e6e421465bd5e0e873aade49e236a3131f06000addb82c5de70f69d0305dbb2a99d88da2d527bdd7ce9fd307263727445361"))
+(expect-failure "A-9f a non-canonical encoding proves nothing either"
+  "G1 coordinates must be canonical"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.prove-liveness 20802172 (mall.enc 1 0)))
+(expect-failure "A-9g the record cannot be walked backwards"
+  "a later beacon is already on record"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.prove-liveness 20801767 mall.SIG))
+(commit-tx)
+;; 🔴 THE RESIDUAL, pinned so it cannot change silently: the module cannot tell
+;; "no beacon exists" from "nobody submitted one". The refund guard is only as
+;; strong as SOMEBODY calling prove-liveness or resolve within VOID-AFTER.
+(begin-tx)
+(expect "A-9h the record is exactly what was last PROVEN, nothing more" 20802172
+  (at 'last-beacon (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+(commit-tx)
+
+(print "baccarat attack suite complete: every attack above FAILED, as required")

@@ -1,0 +1,392 @@
+;; baccarat-oracle-testing.repl — a DIFFERENTIAL accounting oracle, and the shoe's invariants.
+;;
+;; Every other suite checks scenarios: do these inputs produce that output. This
+;; one checks INVARIANTS, by recomputing the module's own bookkeeping a second
+;; way and requiring the two to agree after every single mutating call.
+;;
+;;   reserved  ==  sum over rounds of (open -> reserve, else -> liability)
+;;   pot       >=  reserved
+;;
+;; The recompute never reads `reserved`; it walks the round rows. So a bug that
+;; updates the aggregate wrongly shows up here even when every scenario test
+;; still passes -- which is exactly the failure a scenario suite cannot see.
+;;
+;; Baccarat adds a second ledger the roulette oracle never had: the SHOE. It is
+;; a pool of counts that every coup draws from, restores what it did not use to,
+;; and refills at the cut card. After every resolve and void:
+;;   SH-1  sum(counts) == remaining
+;;   SH-2  remaining fell by exactly the cards the coup shows (or, on a refill,
+;;         stands at 416 minus them)
+;;   SH-3  shoe-seq is the round just settled
+;;   SH-4  a void deals nothing: counts and remaining untouched, shoe-seq advances
+;;   SH-5  the refill: under a cut of 416 the next coup refills first; under 26 it does not
+;;   SH-6  the refill decision reads the ROUND's cut, never the live dial
+;;
+;; THE CLOCK. Five rounds need five distinct genuine beacons, opened in beacon
+;; order and settled in round order. A round opened at T pins
+;; round-at(T + bet-window + drand-margin), so T = time-of-round(r) - window -
+;; margin, and the next round may only open after this one's close. Beacons
+;; 20801767 and 20801768 are three seconds apart, so round 2 opens under a
+;; 30 s window and a 60 s margin; 20802058 and 20802059 likewise under 30 + 210
+;; and then 30 + 150. Every dial change is an admin `set-params`, checked by the
+;; oracle like any other mutating call.
+
+(load "baccarat-test-init.repl")
+
+(begin-tx)
+(module oracle GG (defcap GG () (enforce true "ok"))
+  ;; A round's live obligation on the pot. `try 0.0` so a seq that was never
+  ;; opened folds harmlessly, letting us sweep a range.
+  (defun round-oblig:decimal (seq:integer)
+    (try 0.0
+      (let* ((r (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round seq)) (st (at 'state r)))
+        (if (= st "open") (at 'reserve r) (at 'liability r)))))
+  (defun true-reserved:decimal (hi:integer)
+    (fold (+) 0.0 (map (round-oblig) (enumerate 1 hi))))
+  (defun contract-reserved:decimal () (at 'reserved (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+  (defun pot:decimal () (coin.get-balance (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account)))
+  (defun check:string (hi:integer label:string)
+    (let ((tr (true-reserved hi)) (cr (contract-reserved)) (p (pot)))
+      (enforce (= tr cr) (format "{}: reserved DIVERGES contract={} oracle={}" [label cr tr]))
+      (enforce (>= p cr) (format "{}: INSOLVENT pot={} < reserved={}" [label p cr]))
+      (format "{} ok" [label])))
+  ;; ---- the shoe, recomputed from its own counts --------------------------
+  (defun count-sum:integer (s:object) (fold (+) 0 (at 'counts s)))
+  ;; the cards a settled coup shows: two or three a side
+  (defun used:integer (seq:integer)
+    (let ((r (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round seq)))
+      (+ (length (at 'punto r)) (length (at 'banco r)))))
+  (defun shuffles:[object] (evs:[object])
+    (filter (lambda (e:object) (= (at 'name e) "n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.SHOE-SHUFFLED")) evs))
+)
+(commit-tx)
+
+(begin-tx)
+(module oprobe OG (defcap OG () (enforce true "ok"))
+  (defconst ALICE "k:a11ce00000000000000000000000000000000000000000000000000000000001")
+  (defconst BOB   "k:b0b0000000000000000000000000000000000000000000000000000000000002")
+  (defconst CAROL "k:ca40100000000000000000000000000000000000000000000000000000000003")
+  ;; genuine drand signatures, one per pinned round
+  (defconst SIG1 "0d745db068db9e16379a49f65d76353d721d79fb459d20b33a50e750e5cdb10400af36e03d4a8414b3a86770d1d1e90e85462dce40b3cf5c27f9fdb477b6f6e0") ; 20801767
+  (defconst SIG2 "3046d0014da5e70c6a4c99fc5fafde0cc68ae79d82ece3177dc7d6147945cfb502d3ce355c42c98368f003bf089aebb110ee7119f62d6402a2187d58f44f297a") ; 20801768
+  (defconst SIG3 "19d1a6c9bf554b87d004b73acccad64cc0b4370735b609369f92a9a53e8a07870651464a0b393ef8c607ff05eab5dd7b870ff5dfafda7140e0e2ed10387d3160") ; 20802058
+  (defconst SIG4 "090610f4d8155e4d56b23988d4f0a0451e42a3cc2c296cf4bc98f5f3bbfed1a811d2467d48083eabef7f856e0e9198166abc9a67de356bee250adf30d4a3c5c7") ; 20802059
+  (defun vmax:decimal (xs:[decimal])
+    (fold (lambda (a:decimal b:decimal) (if (> b a) b a)) 0.0 xs)))
+(commit-tx)
+
+
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.initialize n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT 30000.0)
+(expect "O-1 after initialize" "after initialize ok" (oracle.check 0 "after initialize"))
+;; 🔴 THE NEGATIVE CONTROL. A check that compares the contract with itself passes
+;; however broken the accounting is. It is here to show that the RECOMPUTE is the
+;; load-bearing half, not the comparison.
+(expect "O-1a CONTROL a self-comparison is vacuous and always passes" true
+  (= (oracle.contract-reserved) (oracle.contract-reserved)))
+;; and the same control for the shoe: a count compared with itself proves nothing
+(expect "SH-0 CONTROL a self-comparison of remaining is vacuous" true
+  (= (at 'remaining (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status)) (at 'remaining (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status))))
+(expect "SH-0a the fresh shoe: counts sum to the remaining 416" 416
+  (oracle.count-sum (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status)))
+(expect "SH-0b and the shoe reports 416 remaining" 416 (at 'remaining (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status)))
+(expect "SH-0c before any coup the shoe stands after round 0" 0 (at 'shoe-seq (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status)))
+(commit-tx)
+(env-sigs [{"key":"h0u5e00000000000000000000000000000000000000000000000000000000004"
+           ,"caps":[(coin.TRANSFER "house-funder" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 15000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.fund-house "house-funder" 15000.0)
+(expect "O-2 after funding" "after funding ok" (oracle.check 0 "after funding"))
+(commit-tx)
+(env-sigs [])
+
+;; ---- round 1: beacon 20801767 under the launch dials (120 s + 120 s) ----------
+(env-chain-data { "block-time": (time "2026-09-20T17:42:13Z") })
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER oprobe.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 1000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet oprobe.ALICE {"punto":100.0,"banco":0.0,"tie": 0.0, "commission": 1.0 })
+(expect "O-3 after a winning board opens round 1" "after bet 1 ok" (oracle.check 1 "after bet 1"))
+(expect "O-3a round 1 pins the beacon we hold a signature for" 20801767
+  (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 1)))
+(commit-tx)
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER oprobe.BOB (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 1000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet oprobe.BOB {"punto":0.0,"banco":50.0,"tie": 5.0, "commission": 1.0 })
+(expect "O-4 after a losing board joins the same round" "after bet 2 ok" (oracle.check 1 "after bet 2"))
+;; VALUE TEST against the measured smoke run: the same two boards, the same pot
+(expect "O-4a the round's reserve is the smoke run's, to the last digit" 201.236825714441
+  (at 'reserve (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 1)))
+(commit-tx)
+(env-sigs [])
+
+;; the dials for round 2: a 30 s window, a 60 s margin, and a cut of 416, so the
+;; coup of the round that opens next is dealt from a refilled shoe (SH-5)
+(env-chain-data { "block-time": (time "2026-09-20T17:44:30Z") })
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.set-params 0.02 0.01 30000.0 30.0 60.0 0.05 416)
+(expect "O-4b after the dials move" "after set-params 1 ok" (oracle.check 1 "after set-params 1"))
+(commit-tx)
+(env-sigs [])
+
+;; ---- round 2: beacon 20801768, opened while round 1 is still unsettled -------
+(env-chain-data { "block-time": (time "2026-09-20T17:44:46Z") })
+(env-sigs [{"key":"ca40100000000000000000000000000000000000000000000000000000000003"
+           ,"caps":[(coin.TRANSFER oprobe.CAROL (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 1000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet oprobe.CAROL {"punto":50.0,"banco":0.0,"tie": 0.0, "commission": 1.0 })
+(expect "O-5 with two rounds open at once" "two rounds open ok" (oracle.check 2 "two rounds open"))
+(expect "O-5a round 2 pins the next beacon" 20801768 (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 2)))
+(expect "O-5b round 1 is still unsettled" "open" (at 'state (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 1)))
+(expect "O-5c round 2 froze the cut of 416" 416 (at 'cut-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 2)))
+(commit-tx)
+(env-sigs [])
+
+;; the dials for round 3 (a 30 s window, a 210 s margin) and the cut back to 26
+(env-chain-data { "block-time": (time "2026-09-20T17:44:50Z") })
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.set-params 0.02 0.01 30000.0 30.0 210.0 0.05 26)
+(expect "O-5d after the dials move again" "after set-params 2 ok" (oracle.check 2 "after set-params 2"))
+(expect "O-5e a live round keeps the cut it opened under" 416 (at 'cut-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 2)))
+(commit-tx)
+(env-sigs [])
+
+;; ---- resolve round 1 (cut 52 at open, 416 cards left: no refill) ------------
+(env-chain-data { "block-time": (time "2026-09-20T17:46:30Z") })
+(env-events true)            ; clear, so the events below are this resolve's only
+(begin-tx)
+(let* ((s0 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status))
+       (w  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.resolve 1 oprobe.SIG1))
+       (ev (env-events true))
+       (s1 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status)))
+  (expect "O-6 after resolve releases the losers' reserve" "after resolve ok" (oracle.check 2 "after resolve"))
+  (expect "O-6a the coup is the smoke run's: punto" "punto" w)
+  (expect "SH-1a counts sum to remaining after coup 1" (at 'remaining s1) (oracle.count-sum s1))
+  (expect "SH-2a remaining fell by exactly the cards coup 1 shows" (- (at 'remaining s0) (oracle.used 1))
+    (at 'remaining s1))
+  (expect "SH-2a1 which is the smoke run's five cards" 411 (at 'remaining s1))
+  (expect "SH-3a shoe-seq is round 1" 1 (at 'shoe-seq s1))
+  (expect "SH-3a1 no refill at 416 cards against a cut of 52: no SHOE-SHUFFLED" 0 (length (oracle.shuffles ev)))
+  (expect "SH-3a2 still shoe 1" 1 (at 'shoe-no s1))
+  (expect "SH-3a3 one coup dealt from it" 1 (at 'dealt-since s1)))
+(commit-tx)
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.claim 1 oprobe.ALICE)
+(expect "O-7 after the winner is paid" "after claim ok" (oracle.check 2 "after claim"))
+(commit-tx)
+
+;; 🔴 drain the pot to its reserved floor: the oracle must still balance, and the
+;; remaining obligation must still be covered.
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.withdraw-house (at 'available (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)))
+(expect "O-8 at the unreserved floor, still balanced and still solvent"
+  "at the floor ok" (oracle.check 2 "at the floor"))
+(expect "O-8a and there is genuinely nothing spare" 0.0
+  (at 'available (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)))
+(commit-tx)
+(env-sigs [])
+
+;; ============================================================================
+;; O-8b  THE FEE IS INSIDE THE RESERVE, NOT BESIDE IT
+;;   `new-res` is max(max(exposure), stake) PLUS the fee accrued on the round.
+;;   Drop the fee term and every scenario suite stays green, because a pot with
+;;   any slack absorbs it. It is only visible HERE, at the unreserved floor:
+;;   `resolve` pays the fee out of the pot, and if the reserve never covered it
+;;   the pot drops BELOW what it still owes the winners of that same round.
+;;   Round 2 is Carol's Player board, so max(exposure) = 100 exceeds her 50
+;;   stake and the reserve is payout-driven -- and beacon 20801768 deals punto
+;;   (measured), the slot that IS the maximum. The whole probe is rolled back,
+;;   because round 2 is resolved for real below, with its refill checked.
+;; ============================================================================
+(begin-tx)
+(expect "O-8c its reserve is the worst payout PLUS the accrued fee, not the payout alone"
+  (+ (oprobe.vmax (at 'exposure (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 2))) (at 'fee-owed (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 2)))
+  (at 'reserve (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 2)))
+(expect "O-8c1 and the fee term is real: the reserve exceeds the worst payout" true
+  (> (at 'reserve (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 2)) (oprobe.vmax (at 'exposure (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 2)))))
+(let ((w (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.resolve 2 oprobe.SIG2)))
+  (expect "O-8d it settled onto the maximum-exposure slot, so the release is the fee alone" true
+    (= (at (if (= w "punto") 0 (if (= w "banco") 1 2)) (at 'exposure (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 2)))
+       (oprobe.vmax (at 'exposure (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 2))))))
+(expect "O-8e paying that fee at the floor leaves the pot still covering what it owes"
+  "resolved at the floor ok" (oracle.check 2 "resolved at the floor"))
+(expect "O-8f and the full liability is payable" "paid 100.0"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.claim 2 oprobe.CAROL))
+(expect "O-8g with the books balanced afterwards"
+  "claimed at the floor ok" (oracle.check 2 "claimed at the floor"))
+(rollback-tx)
+
+;; the pot is refilled so the later rounds have a table to sit at
+(env-chain-data { "block-time": (time "2026-09-20T17:50:00Z") })
+(env-sigs [{"key":"h0u5e00000000000000000000000000000000000000000000000000000000004"
+           ,"caps":[(coin.TRANSFER "house-funder" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 15000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.fund-house "house-funder" 15000.0)
+(expect "O-8h after funding the drained pot again" "after refunding ok" (oracle.check 2 "after refunding"))
+(commit-tx)
+(env-sigs [])
+
+;; ============================================================================
+;; SH-5  THE REFILL. Round 2 opened under a cut of 416, and 411 cards remain, so
+;;   the pool is refilled BEFORE its coup is dealt: SHOE-SHUFFLED fires, the
+;;   shoe number moves on, and the coup is the first from the new shoe.
+;; ============================================================================
+(env-chain-data { "block-time": (time "2026-09-20T17:50:10Z") })
+(env-events true)
+(begin-tx)
+(let* ((s0 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status))
+       (cut (at 'cut-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 2)))
+       (w  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.resolve 2 oprobe.SIG2))
+       (ev (env-events true))
+       (s1 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status)))
+  (expect "SH-5 PRECONDITION the pool is at or under the round's cut" true (<= (at 'remaining s0) cut))
+  (expect "O-9 after a coup dealt from a refilled shoe" "after refill resolve ok" (oracle.check 2 "after refill resolve"))
+  (expect "O-9a the coup is punto (measured)" "punto" w)
+  (expect "SH-5a exactly one SHOE-SHUFFLED fired" 1 (length (oracle.shuffles ev)))
+  (expect "SH-5b naming round 2 and shoe 2" [2 2] (at 'params (at 0 (oracle.shuffles ev))))
+  (expect "SH-5c the shoe number moved on by one" (+ 1 (at 'shoe-no s0)) (at 'shoe-no s1))
+  (expect "SH-5d this is the first coup of the new shoe" 1 (at 'dealt-since s1))
+  (expect "SH-5e remaining is a full shoe minus this coup's cards" (- 416 (oracle.used 2)) (at 'remaining s1))
+  (expect "SH-1b counts sum to remaining after the refill" (at 'remaining s1) (oracle.count-sum s1))
+  (expect "SH-3b shoe-seq is round 2" 2 (at 'shoe-seq s1)))
+(commit-tx)
+(begin-tx)
+(expect "O-10 Carol's winning board is paid" "paid 100.0" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.claim 2 oprobe.CAROL))
+(expect "O-10a after that claim" "after claim 2 ok" (oracle.check 2 "after claim 2"))
+(commit-tx)
+
+;; ---- round 3: beacon 20802058, opened under a cut of 26 ----------------------
+;; a board on all three slots, so whichever wins it is owed something
+(env-chain-data { "block-time": (time "2026-09-20T17:56:46Z") })
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER oprobe.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 1000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet oprobe.ALICE {"punto":10.0,"banco":10.0,"tie": 1.0, "commission": 1.0 })
+(expect "O-11 after round 3 opens" "after bet 3 ok" (oracle.check 3 "after bet 3"))
+(expect "O-11a round 3 pins 20802058" 20802058 (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 3)))
+(expect "O-11b round 3 froze the cut of 26" 26 (at 'cut-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 3)))
+(commit-tx)
+(env-sigs [])
+
+;; the dials for round 4: a 30 s window and a 150 s margin, the cut unchanged
+(env-chain-data { "block-time": (time "2026-09-20T17:57:30Z") })
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.set-params 0.02 0.01 30000.0 30.0 150.0 0.05 26)
+(expect "O-11c after the dials move" "after set-params 3 ok" (oracle.check 3 "after set-params 3"))
+(commit-tx)
+(env-sigs [])
+
+;; ---- round 4: beacon 20802059, opened under a cut of 26 ----------------------
+(env-chain-data { "block-time": (time "2026-09-20T17:57:49Z") })
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER oprobe.BOB (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 1000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet oprobe.BOB {"punto":10.0,"banco":10.0,"tie": 1.0, "commission": 1.0 })
+(expect "O-12 after round 4 opens" "after bet 4 ok" (oracle.check 4 "after bet 4"))
+(expect "O-12a round 4 pins 20802059" 20802059 (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 4)))
+(expect "O-12b round 4 froze the cut of 26" 26 (at 'cut-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 4)))
+(commit-tx)
+(env-sigs [])
+
+;; ============================================================================
+;; SH-5 (continued)  UNDER A CUT OF 26 THE SAME SHOE DEALS ON
+;; ============================================================================
+(env-chain-data { "block-time": (time "2026-09-20T18:00:50Z") })
+(env-events true)
+(begin-tx)
+(let* ((s0 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status))
+       (w  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.resolve 3 oprobe.SIG3))
+       (ev (env-events true))
+       (s1 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status)))
+  (expect "SH-5f PRECONDITION the pool is above round 3's cut" true (> (at 'remaining s0) 26))
+  (expect "O-13 after resolve 3" "after resolve 3 ok" (oracle.check 4 "after resolve 3"))
+  (expect "SH-5g no SHOE-SHUFFLED" 0 (length (oracle.shuffles ev)))
+  (expect "SH-5h the shoe number is unchanged" (at 'shoe-no s0) (at 'shoe-no s1))
+  (expect "SH-5i one more coup dealt from this shoe" (+ 1 (at 'dealt-since s0)) (at 'dealt-since s1))
+  (expect "SH-1c counts sum to remaining after coup 3" (at 'remaining s1) (oracle.count-sum s1))
+  (expect "SH-2c remaining fell by exactly the cards coup 3 shows" (- (at 'remaining s0) (oracle.used 3))
+    (at 'remaining s1))
+  (expect "SH-3c shoe-seq is round 3" 3 (at 'shoe-seq s1)))
+(commit-tx)
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.claim 3 oprobe.ALICE)
+(expect "O-14 after Alice's three-slot board is paid" "after claim 3 ok" (oracle.check 4 "after claim 3"))
+(commit-tx)
+
+;; the live dial goes to 416 while round 4, opened under 26, is unsettled; the
+;; window and margin go back to launch for round 5
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.set-params 0.02 0.01 30000.0 120.0 120.0 0.05 416)
+(expect "O-15 after the live cut moves under an open round" "after set-params 4 ok" (oracle.check 4 "after set-params 4"))
+(commit-tx)
+(env-sigs [])
+
+;; ============================================================================
+;; SH-6  THE REFILL DECISION READS THE ROUND'S CUT, NOT THE LIVE DIAL.
+;;   The pool now sits UNDER the live cut of 416 -- read live, it would refill --
+;;   and above round 4's frozen 26. Round 4 must deal from the same shoe.
+;; ============================================================================
+(env-events true)
+(begin-tx)
+(let* ((s0 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status))
+       (w  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.resolve 4 oprobe.SIG4))
+       (ev (env-events true))
+       (s1 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status)))
+  (expect "SH-6a PRECONDITION read against the LIVE dial this pool would refill" true
+    (<= (at 'remaining s0) (at 'cut-card (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params))))
+  (expect "SH-6b PRECONDITION read against the round's own cut it would not" true
+    (> (at 'remaining s0) (at 'cut-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 4))))
+  (expect "O-16 after resolve 4" "after resolve 4 ok" (oracle.check 4 "after resolve 4"))
+  (expect "SH-6c no SHOE-SHUFFLED" 0 (length (oracle.shuffles ev)))
+  (expect "SH-6d the shoe number is unchanged" (at 'shoe-no s0) (at 'shoe-no s1))
+  (expect "SH-6e one more coup dealt from this shoe" (+ 1 (at 'dealt-since s0)) (at 'dealt-since s1))
+  (expect "SH-1d counts sum to remaining after coup 4" (at 'remaining s1) (oracle.count-sum s1))
+  (expect "SH-2d remaining fell by exactly the cards coup 4 shows" (- (at 'remaining s0) (oracle.used 4))
+    (at 'remaining s1))
+  (expect "SH-3d shoe-seq is round 4" 4 (at 'shoe-seq s1)))
+(commit-tx)
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.claim 4 oprobe.BOB)
+(expect "O-17 after Bob's three-slot board is paid" "after claim 4 ok" (oracle.check 4 "after claim 4"))
+(commit-tx)
+
+;; ---- round 5: beacon 20802172, left unsettled for the refund path -----------
+(env-chain-data { "block-time": (time "2026-09-20T18:02:28Z") })
+(env-sigs [{"key":"ca40100000000000000000000000000000000000000000000000000000000003"
+           ,"caps":[(coin.TRANSFER oprobe.CAROL (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 1000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet oprobe.CAROL {"punto":50.0,"banco":0.0,"tie": 0.0, "commission": 1.0 })
+(expect "O-18 after round 5 opens" "after bet 5 ok" (oracle.check 5 "after bet 5"))
+(expect "O-18a round 5 pins 20802172" 20802172 (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 5)))
+(commit-tx)
+(env-sigs [])
+
+;; the refund path, ninety days on, with nobody having proven drand alive since
+(env-chain-data { "block-time": (time "2026-12-25T00:00:00Z") })
+(begin-tx)
+(let* ((s0 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status))
+       (v  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.void-round 5))
+       (s1 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status)))
+  (expect "O-19 after a round voids" "after void ok" (oracle.check 5 "after void"))
+  (expect "SH-4a a void leaves every count untouched" (at 'counts s0) (at 'counts s1))
+  (expect "SH-4b and remaining untouched" (at 'remaining s0) (at 'remaining s1))
+  (expect "SH-4c and the shoe number untouched" (at 'shoe-no s0) (at 'shoe-no s1))
+  (expect "SH-4d and the coups-dealt count untouched" (at 'dealt-since s0) (at 'dealt-since s1))
+  (expect "SH-4e but it takes round 5's turn: shoe-seq advances" 5 (at 'shoe-seq s1))
+  (expect "SH-1e counts still sum to remaining" (at 'remaining s1) (oracle.count-sum s1)))
+(commit-tx)
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.claim 5 oprobe.CAROL)
+(expect "O-20 after the refund is taken" "after refund ok" (oracle.check 5 "after refund"))
+(expect "O-20a every obligation is discharged" 0.0 (oracle.true-reserved 5))
+(expect "O-20b and the contract agrees" 0.0 (oracle.contract-reserved))
+(commit-tx)
+
+(print "baccarat accounting oracle: contract and independent recompute agreed at every step, and the shoe held its invariants")

@@ -1,0 +1,728 @@
+;; baccarat-capfloor-testing.repl — the TABLE LIMIT's two operands, pinned, on all three slots.
+;;
+;; The cap is `f0 * min(available, a0)`. Every part of that expression is
+;; load-bearing: `a0` frozen at open stops funding from widening a table already
+;; in play, and `available` stops a withdrawal from leaving a round sized against
+;; money that has gone. A check that exists without a pin is the shape this repo
+;; keeps hitting, so each operand gets a refusal that only it can produce.
+;;
+;;   CF-1  the DENOMINATOR disappears (withdrawal mid-round)  -> `available` binds
+;;   CF-2  the DENOMINATOR grows      (funding mid-round)     -> `a0` binds
+;;   CF-3  what `pot-status` ADVERTISES is a board `bet` actually takes
+;;   CF-4  `a0` is the pot minus what an earlier, unsettled round still owes
+;;   CF-5  below the table minimum nothing is advertised
+;;   CF-6  at share 1.0: whether the SECOND enforce in `bet` can ever fire
+;;
+;; Every probe asserts its own preconditions before the refusal, so a refusal
+;; can never pass for the wrong reason: inside the reverted cap, outside the live
+;; one, and comfortably inside solvency. Baccarat's exposure is a 3-slot vector
+;; [punto banco tie], so every probe runs on each slot.
+
+(load "baccarat-test-init.repl")
+
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.initialize n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT 100000.0)
+(commit-tx)
+(env-sigs [{"key":"h0u5e00000000000000000000000000000000000000000000000000000000004"
+           ,"caps":[(coin.TRANSFER "house-funder" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 50000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.fund-house "house-funder" 50000.0)
+(commit-tx)
+(env-sigs [])
+
+(begin-tx)
+(module cfh GOV (defcap GOV () (enforce true "ok"))
+  (defconst ALICE "k:a11ce00000000000000000000000000000000000000000000000000000000001")
+  (defconst BOBBY "k:b0b0000000000000000000000000000000000000000000000000000000000002")
+  (defconst SLOTS:[integer] [0 1 2])
+  (defun vmax:decimal (xs:[decimal])
+    (fold (lambda (x:decimal y:decimal) (if (> y x) y x)) 0.0 xs))
+  ;; a board on one slot only
+  (defun on-slot:object (k:integer s:decimal)
+    (cond ((= k 0) {"punto": s, "banco": 0.0, "tie": 0.0, "commission": 1.0 })
+          ((= k 1) {"punto": 0.0, "banco": s, "tie": 0.0, "commission": 1.0 })
+          {"punto": 0.0, "banco": 0.0, "tie": s, "commission": 1.0 }))
+  ;; the gross a unit on each slot pays at the launch commission: 2, 1.95, 9
+  (defun gross:decimal (k:integer) (at k [2.0 1.95 9.0]))
+  ;; what the round's table limit measures if board `w` joins round `r`: the
+  ;; worst slot of the summed vector plus every fee. Built from the module's own
+  ;; payout and fee functions, because it only POSITIONS a probe; the refusal is
+  ;; always `bet`'s own.
+  (defun charge:decimal (r:object w:object scale:decimal)
+    (let* ((c (at 'commission-at-open r))
+           (own (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.board-vector (at 'punto w) (at 'banco w) (at 'tie w) c)))
+      (+ (vmax (zip (lambda (x:decimal y:decimal) (+ x y)) (at 'exposure r) own))
+         (+ (at 'fee-owed r) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.fee-for (at 'punto w) (at 'banco w) (at 'tie w) c scale)))))
+  ;; a stake on slot k whose charge lands just BELOW `target`: 0.15 per unit is a
+  ;; deliberate over-estimate of the fee (the largest edge, Tie's, is 0.1436)
+  (defun solve:decimal (k:integer target:decimal r:object)
+    (floor (/ (- target (+ (at k (at 'exposure r)) (at 'fee-owed r))) (+ (gross k) 0.15)) 12))
+  (defun cur-round:object ()
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round (at 'current (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))))
+(commit-tx)
+
+;; ============================================================================
+;; CF-1  THE DENOMINATOR DISAPPEARING.
+;;   `a0` is frozen at open so a later set-params cannot widen the numerator. It
+;;   does nothing about the pot itself leaving: with a round open, an admin
+;;   withdrawal leaves a stranger free to size a board against money that is
+;;   gone, unless the cap also reads `available`.
+;; ============================================================================
+(env-chain-data { "block-time": (time "2027-02-01T00:00:00Z") })
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER cfh.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 100000.0)]}])
+(begin-tx)
+;; This board is the round's standing exposure for the whole file: 2 x 40 plus a
+;; fee of 0.247 against a cap of 0.02 x 50000 = 1000, about 8% of the cap. Its
+;; exposure vector is [80 0 40] -- Player's slot is the round's maximum.
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet cfh.ALICE {"punto": 40.0, "banco": 0.0, "tie": 0.0, "commission": 1.0 })   ; opens the round
+(commit-tx)
+(env-sigs [])
+
+(begin-tx)
+(expect "CF-1a the round froze the pot as it stood at open" 50000.0
+  (at 'avail-at-open (cfh.cur-round)))
+(expect "CF-1a1 and the standing exposure is Alice's board" [80.0 0.0 40.0]
+  (at 'exposure (cfh.cur-round)))
+(commit-tx)
+
+;; the admin takes 90% of what is unreserved. This is a legitimate call: the
+;; pot's own solvency check still passes. It is the TABLE LIMIT that must notice.
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(let ((p (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)))
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.withdraw-house (floor (* 0.9 (at 'available p)) 12)))
+(commit-tx)
+(env-sigs [])
+
+;; one probe per slot, each in its own rolled-back transaction: a refused `bet`
+;; has already opened nothing here, but it may have read-and-written the round
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER cfh.BOBBY (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 100000.0)]}])
+(begin-tx)
+(let* ( (r     (cfh.cur-round))
+        (a0    (at 'avail-at-open r))
+        (f0    (at 'frac-at-open r))
+        (p     (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status))
+        (now   (at 'available p))
+        (scale (at 'fee-scale-now p))
+        ;; the midpoint of the two caps: strictly above the live one, strictly
+        ;; below the reverted one, BY CONSTRUCTION rather than by a lucky number
+        (target (* f0 (* 0.5 (+ now a0))))
+        (w     (cfh.on-slot 0 (cfh.solve 0 target r)))
+        (charged (cfh.charge r w scale)) )
+  (expect "CF-1b the pot really did shrink below what the round opened against" true (< now a0))
+  (expect "CF-1c [punto] the probe board is INSIDE the reverted cap f0*a0" true (< charged (* f0 a0)))
+  (expect "CF-1d [punto] the probe board is OUTSIDE the live cap f0*min(available,a0)" true (> charged (* f0 now)))
+  ;; if this failed, the refusal below would be solvency talking, not the cap
+  (expect "CF-1e [punto] solvency is NOT what refuses it -- the pot covers this board" true (< charged now))
+  (expect-failure "CF-1f [punto] the table limit refuses a board sized against a pot that left"
+    "would exceed the table limit"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet cfh.BOBBY w)))
+(rollback-tx)
+(begin-tx)
+(let* ( (r (cfh.cur-round)) (a0 (at 'avail-at-open r)) (f0 (at 'frac-at-open r))
+        (p (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)) (now (at 'available p)) (scale (at 'fee-scale-now p))
+        (target (* f0 (* 0.5 (+ now a0))))
+        (w (cfh.on-slot 1 (cfh.solve 1 target r)))
+        (charged (cfh.charge r w scale)) )
+  (expect "CF-1g [banco] the probe board is INSIDE the reverted cap" true (< charged (* f0 a0)))
+  (expect "CF-1h [banco] and OUTSIDE the live cap" true (> charged (* f0 now)))
+  (expect "CF-1i [banco] and the pot covers it" true (< charged now))
+  (expect-failure "CF-1j [banco] the table limit refuses it"
+    "would exceed the table limit"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet cfh.BOBBY w)))
+(rollback-tx)
+(begin-tx)
+(let* ( (r (cfh.cur-round)) (a0 (at 'avail-at-open r)) (f0 (at 'frac-at-open r))
+        (p (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)) (now (at 'available p)) (scale (at 'fee-scale-now p))
+        (target (* f0 (* 0.5 (+ now a0))))
+        (w (cfh.on-slot 2 (cfh.solve 2 target r)))
+        (charged (cfh.charge r w scale)) )
+  (expect "CF-1k [tie] the probe board is INSIDE the reverted cap" true (< charged (* f0 a0)))
+  (expect "CF-1l [tie] and OUTSIDE the live cap" true (> charged (* f0 now)))
+  (expect "CF-1m [tie] and the pot covers it" true (< charged now))
+  (expect-failure "CF-1n [tie] the table limit refuses it"
+    "would exceed the table limit"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet cfh.BOBBY w)))
+(rollback-tx)
+(env-sigs [])
+
+;; ============================================================================
+;; CF-2  THE DENOMINATOR GROWING. The mirror image, and the reason the
+;;   expression is min() and not simply `available`: funding the pot mid-round
+;;   must not retroactively widen a table that players already sat down at.
+;; ============================================================================
+(env-sigs [{"key":"h0u5e00000000000000000000000000000000000000000000000000000000004"
+           ,"caps":[(coin.TRANSFER "house-funder" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 90000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.fund-house "house-funder" 90000.0)
+(commit-tx)
+(env-sigs [])
+
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER cfh.BOBBY (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 100000.0)]}])
+(begin-tx)
+(let* ( (r (cfh.cur-round)) (a0 (at 'avail-at-open r)) (f0 (at 'frac-at-open r))
+        (p (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)) (now (at 'available p)) (scale (at 'fee-scale-now p))
+        (target (* f0 (* 0.5 (+ now a0))))
+        (w (cfh.on-slot 0 (cfh.solve 0 target r)))
+        (charged (cfh.charge r w scale)) )
+  (expect "CF-2a the pot is now LARGER than what the round opened against" true (> now a0))
+  (expect "CF-2b [punto] the probe board is OUTSIDE the frozen cap f0*a0" true (> charged (* f0 a0)))
+  (expect "CF-2c [punto] but INSIDE what a live-`available` cap would have allowed" true (< charged (* f0 now)))
+  (expect-failure "CF-2d [punto] funding mid-round does not widen a table already in play"
+    "would exceed the table limit"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet cfh.BOBBY w)))
+(rollback-tx)
+(begin-tx)
+(let* ( (r (cfh.cur-round)) (a0 (at 'avail-at-open r)) (f0 (at 'frac-at-open r))
+        (p (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)) (now (at 'available p)) (scale (at 'fee-scale-now p))
+        (target (* f0 (* 0.5 (+ now a0))))
+        (w (cfh.on-slot 1 (cfh.solve 1 target r)))
+        (charged (cfh.charge r w scale)) )
+  (expect "CF-2e [banco] OUTSIDE the frozen cap" true (> charged (* f0 a0)))
+  (expect "CF-2f [banco] INSIDE a live-`available` cap" true (< charged (* f0 now)))
+  (expect-failure "CF-2g [banco] refused by the table limit"
+    "would exceed the table limit"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet cfh.BOBBY w)))
+(rollback-tx)
+(begin-tx)
+(let* ( (r (cfh.cur-round)) (a0 (at 'avail-at-open r)) (f0 (at 'frac-at-open r))
+        (p (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)) (now (at 'available p)) (scale (at 'fee-scale-now p))
+        (target (* f0 (* 0.5 (+ now a0))))
+        (w (cfh.on-slot 2 (cfh.solve 2 target r)))
+        (charged (cfh.charge r w scale)) )
+  (expect "CF-2h [tie] OUTSIDE the frozen cap" true (> charged (* f0 a0)))
+  (expect "CF-2i [tie] INSIDE a live-`available` cap" true (< charged (* f0 now)))
+  (expect-failure "CF-2j [tie] refused by the table limit"
+    "would exceed the table limit"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet cfh.BOBBY w)))
+(rollback-tx)
+(env-sigs [])
+
+;; ============================================================================
+;; CF-3  WHAT pot-status PUBLISHES AS THE MAXIMUM IS A BOARD `bet` TAKES, ON EVERY SLOT.
+;;   A front end is explicitly invited to build on these numbers, so each one,
+;;   placed verbatim, must be accepted -- here, and mid-round after the pot has
+;;   shrunk. The sizing figure (sized-*-bet, the bankroll rule) is published
+;;   beside it and is never what `bet` enforces.
+;; ============================================================================
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER cfh.BOBBY (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 100000.0)]}])
+(begin-tx)
+(let* ((p (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)) (advert (at 'max-punto-bet p)))
+  (expect "CF-3a [punto] there IS an advertised board to check" true (> advert 0.0))
+  ;; the sizing figure beside it is the bankroll rule, and at this pot the cap admits MORE
+  ;; than the pot is sized to keep -- recorded so the mid-round case below is known to differ
+  (expect "CF-3a1 [punto] the sizing figure is pot/250" (floor (/ (at 'available p) 250.0) 12) (at 'sized-punto-bet p))
+  (expect "CF-3a1x [punto] and the published maximum is the cap's, above the sizing figure here" true (> advert (at 'sized-punto-bet p)))
+  (expect "CF-3b [punto] the advertised maximum is accepted verbatim" "bet placed in round 1"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet cfh.BOBBY (cfh.on-slot 0 advert))))
+(rollback-tx)
+(begin-tx)
+(let* ((p (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)) (advert (at 'max-banco-bet p)))
+  (expect "CF-3a2 [banco] there IS an advertised board to check" true (> advert 0.0))
+  (expect "CF-3b1 [banco] the advertised maximum is accepted verbatim" "bet placed in round 1"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet cfh.BOBBY (cfh.on-slot 1 advert))))
+(rollback-tx)
+(begin-tx)
+(let* ((p (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)) (advert (at 'max-tie-bet p)))
+  (expect "CF-3a3 [tie] there IS an advertised board to check" true (> advert 0.0))
+  (expect "CF-3b2 [tie] the advertised maximum is accepted verbatim" "bet placed in round 1"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet cfh.BOBBY (cfh.on-slot 2 advert))))
+(rollback-tx)
+(env-sigs [])
+
+;; ---- CF-3t  THE CROSS-SLOT TERM: a box's bound can come from ANOTHER slot ----
+;; A Tie board of 60 makes the Tie slot the round's largest by far (580 against
+;; Player's 80). A Player or Banker unit also lands ONE unit on that slot (its
+;; stake is pushed back on a tie), so with the Tie slot this high their maxima are
+;; bound by it, BELOW what their own slot alone would allow. The re-check of
+;; 2026-09-25 (R-1) ran a mutant that dropped that unit through every suite
+;; unnoticed; this block is what catches it. Each case is one transaction, rolled
+;; back, so the file's standing exposure is unchanged afterwards; the refusal comes
+;; before the accepted board, since a refused board leaves no board behind.
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER cfh.BOBBY (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 100000.0)]}
+          ,{"key":"ca40100000000000000000000000000000000000000000000000000000000003"
+           ,"caps":[(coin.TRANSFER "k:ca40100000000000000000000000000000000000000000000000000000000003" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 100000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet cfh.BOBBY (cfh.on-slot 2 60.0))
+(let* ((r (cfh.cur-round)) (ex (at 'exposure r)))
+  (expect "CF-3t PRECONDITION the Tie slot is now the round's largest, by more than half the cap" true
+    (and (> (at 2 ex) (+ (at 0 ex) 400.0)) (> (at 2 ex) (at 1 ex)))))
+(let* ((p (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)) (r (cfh.cur-round)) (ex (at 'exposure r)) (a0 (at 'avail-at-open r))
+       (cap (* (at 'frac-at-open r) (if (< (at 'available p) a0) (at 'available p) a0)))
+       (scale (at 'fee-scale-now p))
+       (ap (at 'max-punto-bet p))
+       (own-only (floor (/ (- cap (+ (at 'fee-owed r) (at 0 ex))) (+ 2.0 (* scale n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.PUNTO-EDGE))) 12)))
+  (expect "CF-3t1 [punto] CONTROL the published maximum is BELOW what the Player slot alone would allow: the Tie slot binds" true
+    (< ap own-only)))
+(let ((ap (at 'max-punto-bet (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status))))
+  (expect-failure "CF-3t2 [punto] a hair above the published maximum is refused by the table limit"
+    "would exceed the table limit"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet "k:ca40100000000000000000000000000000000000000000000000000000000003" (cfh.on-slot 0 (+ ap 0.00000001)))))
+(let ((ap (at 'max-punto-bet (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status))))
+  (expect "CF-3t3 [punto] and the published maximum itself is accepted verbatim" "bet placed in round 1"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet "k:ca40100000000000000000000000000000000000000000000000000000000003" (cfh.on-slot 0 ap))))
+(rollback-tx)
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet cfh.BOBBY (cfh.on-slot 2 60.0))
+(let* ((p (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)) (r (cfh.cur-round)) (ex (at 'exposure r)) (a0 (at 'avail-at-open r))
+       (cap (* (at 'frac-at-open r) (if (< (at 'available p) a0) (at 'available p) a0)))
+       (scale (at 'fee-scale-now p))
+       (ab (at 'max-banco-bet p))
+       (own-only (floor (/ (- cap (+ (at 'fee-owed r) (at 1 ex))) (+ 1.95 (* scale (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.banco-edge 0.05)))) 12)))
+  (expect "CF-3t4 [banco] CONTROL the published maximum is BELOW what the Banker slot alone would allow: the Tie slot binds" true
+    (< ab own-only)))
+(let ((ab (at 'max-banco-bet (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status))))
+  (expect-failure "CF-3t5 [banco] a hair above the published maximum is refused by the table limit"
+    "would exceed the table limit"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet "k:ca40100000000000000000000000000000000000000000000000000000000003" (cfh.on-slot 1 (+ ab 0.00000001)))))
+(let ((ab (at 'max-banco-bet (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status))))
+  (expect "CF-3t6 [banco] and the published maximum itself is accepted verbatim" "bet placed in round 1"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet "k:ca40100000000000000000000000000000000000000000000000000000000003" (cfh.on-slot 1 ab))))
+(rollback-tx)
+(env-sigs [])
+
+;; and the same claim mid-round, against a pot that has shrunk since the round
+;; opened. 🔴 The pot is left at 5000 unreserved, and the number is derived, not
+;; picked: the cap binds only where f0*available - 80.25 < 2*available/250, i.e.
+;; below about 6,700, and it leaves no headroom at all below 80.25/0.02 = 4,012.
+;; 5000 sits inside that window, so the CAP expression is what gets exercised --
+;; at a pot where the bankroll rule binds, reverting the cap is INVISIBLE.
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.withdraw-house (- (at 'available (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)) 5000.0))
+(commit-tx)
+(env-sigs [])
+
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER cfh.BOBBY (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 100000.0)]}])
+(begin-tx)
+(let* ((p (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)) (advert (at 'max-punto-bet p)) (r (cfh.cur-round)))
+  (expect "CF-3c the round is still open against the bigger pot it froze" true
+    (> (at 'avail-at-open r) (at 'available p)))
+  (expect "CF-3c1 the pot is the derived 5000 unreserved" 5000.0 (at 'available p))
+  (expect "CF-3d [punto] mid-round, with the pot shrunk, it still advertises a real board" true (> advert 0.0))
+  ;; without this, CF-3e passes for the wrong reason the moment the bankroll
+  ;; rule happens to be the smaller of the two
+  (expect "CF-3d1 [punto] CONTROL it is the TABLE CAP that bounds it, not the bankroll rule" true
+    (< advert (floor (/ (at 'available p) 250.0) 12)))
+  (expect "CF-3e [punto] and THAT board is accepted verbatim" "bet placed in round 1"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet cfh.BOBBY (cfh.on-slot 0 advert))))
+(rollback-tx)
+;; Player's slot holds the round's maximum, so its advert is the exact edge: a
+;; hundred-millionth more is refused, and by the table limit.
+(begin-tx)
+(let* ((p (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)) (advert (at 'max-punto-bet p)))
+  (expect-failure "CF-3e1 [punto] a hair above the advert is refused by the table limit"
+    "would exceed the table limit"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet cfh.BOBBY (cfh.on-slot 0 (+ advert 0.00000001)))))
+(rollback-tx)
+(begin-tx)
+(let* ((p (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)) (advert (at 'max-banco-bet p)))
+  (expect "CF-3f [banco] mid-round it still advertises a real board" true (> advert 0.0))
+  ;; Banker is not this round's largest slot, so the exact per-slot bound is ABOVE
+  ;; what the old headroom rule (cap - largest slot - fee, on every box) would say
+  (expect "CF-3f1 [banco] CONTROL the exact bound exceeds the old headroom lower bound" true
+    (let* ((r (cfh.cur-round)) (a0 (at 'avail-at-open r))
+           (cap (* (at 'frac-at-open r) (if (< (at 'available p) a0) (at 'available p) a0)))
+           (room (- cap (+ (at 'fee-owed r) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.vmax (at 'exposure r)))))
+           (old (floor (/ room (+ 1.95 (* (at 'fee-scale-now p) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.banco-edge 0.05)))) 12)))
+      (> advert old)))
+  (expect "CF-3f2 [banco] and that board is accepted verbatim" "bet placed in round 1"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet cfh.BOBBY (cfh.on-slot 1 advert))))
+(rollback-tx)
+;; Banker is NOT the round's largest slot here, so the old headroom rule published
+;; a lower bound (a Banker 50 was accepted against a published 10 -- review 2026-09-25);
+;; the exact per-slot bound makes the published figure the edge itself.
+(begin-tx)
+(let* ((p (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)) (advert (at 'max-banco-bet p)))
+  (expect-failure "CF-3f3 [banco] a hair above the published maximum is refused by the table limit"
+    "would exceed the table limit"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet cfh.BOBBY (cfh.on-slot 1 (+ advert 0.00000001)))))
+(rollback-tx)
+(begin-tx)
+(let* ((p (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)) (advert (at 'max-tie-bet p)))
+  (expect "CF-3g [tie] mid-round it still advertises a real board" true (> advert 0.0))
+  (expect "CF-3g1 [tie] CONTROL the exact bound exceeds the old headroom lower bound" true
+    (let* ((r (cfh.cur-round)) (a0 (at 'avail-at-open r))
+           (cap (* (at 'frac-at-open r) (if (< (at 'available p) a0) (at 'available p) a0)))
+           (room (- cap (+ (at 'fee-owed r) (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.vmax (at 'exposure r)))))
+           (old (floor (/ room (+ 9.0 (* (at 'fee-scale-now p) n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.TIE-EDGE))) 12)))
+      (> advert old)))
+  (expect "CF-3g2 [tie] and that board is accepted verbatim" "bet placed in round 1"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet cfh.BOBBY (cfh.on-slot 2 advert))))
+(rollback-tx)
+(begin-tx)
+(let* ((p (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)) (advert (at 'max-tie-bet p)))
+  (expect-failure "CF-3g3 [tie] a hair above the published maximum is refused by the table limit"
+    "would exceed the table limit"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet cfh.BOBBY (cfh.on-slot 2 (+ advert 0.00000001)))))
+(rollback-tx)
+(env-sigs [])
+
+;; ============================================================================
+;; CF-4  `avail-at-open` IS THE POT MINUS WHAT EARLIER ROUNDS STILL OWE
+;;   Every round freezes the pot as it stood when it opened, and that number is
+;;   the UNRESERVED pot -- `balance` minus `reserved`. Taking the raw balance
+;;   instead hands a new round a cap sized on money that is already promised to
+;;   the rounds before it, and with one round open the two expressions are the
+;;   same number. It only separates while an EARLIER round is still unsettled --
+;;   the normal state of a running table. Round 1 is closed to bets, unsettled,
+;;   and still holds its reserve, so this is that state, reached without
+;;   contriving anything.
+;; ============================================================================
+(env-chain-data { "block-time": (time "2027-02-01T00:05:00Z") })
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER cfh.BOBBY (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 100000.0)]}
+          ,{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER cfh.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 100000.0)]}
+          ,{"key":"h0u5e00000000000000000000000000000000000000000000000000000000004"
+           ,"caps":[(coin.TRANSFER "house-funder" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 200000.0)]}])
+(begin-tx)
+(let* ( (bal0 (coin.get-balance (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account)))
+        (res0 (at 'reserved (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+        (r1   (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 1))
+        ;; opening the second round is the act under test
+        (opened (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet cfh.BOBBY {"punto": 1.0, "banco": 0.0, "tie": 0.0, "commission": 1.0 }))
+        (seq  (at 'current (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+        (r2   (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round seq)) )
+
+  (expect "CF-4a round 1 really is still unsettled" "open" (at 'state r1))
+  (expect "CF-4a1 and it really still holds reserve, so the two expressions differ" true (> res0 0.0))
+  (expect "CF-4a2 the second round is a NEW round, not a join" 2 seq)
+  ;; 🔴 THE PIN. Read from the two live values, never restated.
+  (expect "CF-4b so avail-at-open is the pot MINUS what round 1 still owes"
+    (- bal0 res0) (at 'avail-at-open r2))
+  (expect "CF-4b1 which is strictly less than the raw balance" true
+    (< (at 'avail-at-open r2) bal0))
+
+  ;; and the consequence, sized so only the difference between the two decides it
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.fund-house "house-funder" 200000.0)
+  (let* ( (p        (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status))
+          (now      (at 'available p))
+          (scale    (at 'fee-scale-now p))
+          (f0       (at 'frac-at-open r2))
+          (r2now    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round seq))
+          ;; the cap as it must be, and the cap a raw-balance `avail` would give
+          (true-cap (* f0 (if (< now (- bal0 res0)) now (- bal0 res0))))
+          (raw-cap  (* f0 (if (< now bal0) now bal0)))
+          ;; three quarters of the way across the gap: clear of both edges
+          (target   (+ true-cap (* 0.75 (- raw-cap true-cap))))
+          ;; exact per-unit Player charge, 2 + scale * PUNTO-EDGE, because the
+          ;; window is only f0 * round 1's reserve wide
+          (stake    (floor (/ (- target (+ (at 0 (at 'exposure r2now)) (at 'fee-owed r2now)))
+                              (+ 2.0 (* scale 0.012350813289))) 12))
+          (w        (cfh.on-slot 0 stake))
+          (charged  (cfh.charge r2now w scale)) )
+    (expect "CF-4c the pot was funded well past both caps, so `available` binds neither" true (> now bal0))
+    (expect "CF-4d the probe board is OUTSIDE the cap the round actually has" true (> charged true-cap))
+    (expect "CF-4e and INSIDE the cap a raw-balance `avail-at-open` would have given" true (< charged raw-cap))
+    (expect "CF-4f solvency is not what refuses it: the pot covers this board many times over" true
+      (< (* 3.0 stake) now))
+    (expect-failure "CF-4g so the table limit refuses a board sized on money round 1 has already promised"
+      "would exceed the table limit"
+      (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet cfh.ALICE w))))
+;; 🔴 rollback-tx: `bet` opens the round and writes rows before the limit checks
+;; fire, and a refused one leaks those writes through a commit.
+(rollback-tx)
+(env-sigs [])
+
+;; ============================================================================
+;; CF-5  BELOW THE TABLE MINIMUM, NOTHING IS ADVERTISED
+;;   The advertised maxima are what a front end sends. When the pot is small
+;;   enough that the bankroll rule falls under the table minimum, publishing that
+;;   number sends the front end to a transaction `bet` refuses on sight, so the
+;;   view publishes 0.0 instead -- on every slot.
+;; ============================================================================
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}
+          ,{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER cfh.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 100000.0)]}])
+(begin-tx)
+(let* ( (p0      (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status))
+        ;; 🔴 DRAINED TO ONE KDA UNRESERVED, derived and not picked: the branch
+        ;; only exists where available/250 falls UNDER the minimum, i.e. below
+        ;; 250 x 0.01 = 2.5 KDA. 1.0 puts the bankroll rule at 0.004.
+        (drained (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.withdraw-house (- (at 'available p0) 1.0)))
+        (p       (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status))
+        (g       (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params))
+        (scale   (at 'fee-scale-now p))
+        (bankroll (floor (/ (at 'available p) 250.0) 12))
+        (bankroll-tie (floor (/ (* 2.0 bankroll) 9.0) 12))
+        ;; no round is taking bets, so the headroom is the live share of the pot
+        (room    (* (at 'reserve-fraction g) (at 'available p)))
+        (by-cap-punto (floor (/ room (+ 2.0 (* scale 0.012350813289))) 12))
+        (by-cap-banco (floor (/ room (+ 1.95 (* scale 0.010579057843))) 12))
+        (by-cap-tie   (floor (/ room (+ 9.0 (* scale 0.143596287784))) 12)) )
+  (expect "CF-5a the pot is down to one KDA unreserved" 1.0 (at 'available p))
+  ;; VALUE TEST: the launch minimum, as a literal -- reading LAUNCH-MIN-BET would move with it
+  (expect "CF-5b the table minimum is 0.01" 0.01 (at 'min-bet p))
+  (expect "CF-5c the bankroll rule alone would publish a real number" 0.004 bankroll)
+  (expect "CF-5c1 and the tie bankroll rule, 2/9 of it" 0.000888888888 bankroll-tie)
+  (expect "CF-5c2 CONTROL it is the bankroll rule that binds on Player, not the cap" true (> by-cap-punto bankroll))
+  (expect "CF-5c3 CONTROL and on Banker" true (> by-cap-banco bankroll))
+  (expect "CF-5c4 CONTROL and on Tie" true (> by-cap-tie bankroll-tie))
+  (expect "CF-5d [punto] the cap's figure is under the minimum too, so nothing is published" 0.0 (at 'max-punto-bet p))
+  ;; on Banker the cap still admits a board just over the minimum, and THAT is what
+  ;; `bet` accepts, so that is what is published -- the contract's own arithmetic
+  (expect "CF-5d1 [banco] the cap admits a board just over the minimum, and that is published"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.box-max room 0.0 [0.0 0.0 0.0] [0.0 1.95 1.0] (* scale (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.banco-edge 0.05))) (at 'max-banco-bet p))
+  (expect "CF-5d1x [banco] which is at or above the minimum" true (>= (at 'max-banco-bet p) 0.01))
+  (expect "CF-5d2 [tie] under the minimum, nothing is published" 0.0 (at 'max-tie-bet p))
+  (expect "CF-5d3 the sizing figures are all under the minimum, so all three read 0.0" [0.0 0.0 0.0]
+    [(at 'sized-punto-bet p) (at 'sized-banco-bet p) (at 'sized-tie-bet p)])
+  ;; 🔴 THE CONSEQUENCE, which is the whole reason the branch exists.
+  (expect-failure "CF-5e [punto] a board of the size it would otherwise publish is refused"
+    "total bet below the table minimum"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet cfh.ALICE (cfh.on-slot 0 bankroll))))
+(rollback-tx)
+;; the other two slots, each against the same drained pot
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.withdraw-house (- (at 'available (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)) 1.0))
+(expect-failure "CF-5f [banco] a board of the raw size is refused"
+  "total bet below the table minimum"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet cfh.ALICE (cfh.on-slot 1 0.004)))
+(rollback-tx)
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.withdraw-house (- (at 'available (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)) 1.0))
+(expect-failure "CF-5g [tie] a board of the raw size is refused"
+  "total bet below the table minimum"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet cfh.ALICE (cfh.on-slot 2 0.000888888888)))
+(rollback-tx)
+(env-sigs [])
+
+;; ============================================================================
+;; CF-6  AT THE WHOLE SPARE POT: THE SECOND ENFORCE IN `bet` IS UNREACHABLE.
+;;   `bet` checks two things. The table limit bounds max(exposure) + fee against
+;;   f0 * min(available, a0); then "the pot cannot cover this bet" bounds what
+;;   the bet adds to the round's reserve, max(max(exposure), stake) + fee, against
+;;   `available`. In roulette the second is load-bearing at share 1.0, because a
+;;   board spread across the wheel stakes MORE than its best pocket pays.
+;;
+;;   In baccarat it cannot happen, and this section is the proof:
+;;     (1) the tie slot of any board is 9t + p + b >= p + b + t, its stake, and
+;;         the round's vector is the sum of its boards', so for every round
+;;         max(exposure) >= stake: the reserve is max(exposure) + fee;
+;;     (2) the table limit then says reserve <= f0 * min(available, a0)
+;;         <= available, because the share is capped at 1.0;
+;;     (3) the round's prior reserve is >= 0, so what the bet ADDS is <= the
+;;         whole new reserve <= available.
+;;   Every board that passes the table limit passes the cover check. The second
+;;   enforce is dead code in baccarat -- recorded for the contract's author, not
+;;   changed here. What IS pinned: (1) over a grid, a CONTROL showing the same
+;;   board without the tie push WOULD open the gap, and boards at the very top
+;;   of the share each accepted with an added reserve <= available, the next
+;;   hair refused by the TABLE LIMIT, never by the cover check.
+;; ============================================================================
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+;; the operator's dial, at the top of its range. A plain admin call: no upgrade,
+;; no governance, and it would work the same after the freeze.
+(expect "CF-6 the operator may set the share to the whole spare pot" "params set"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.set-params 1.0 0.01 100000.0 120.0 120.0 0.05 52))
+(commit-tx)
+(env-sigs [])
+
+(begin-tx)
+(module cf6 G6 (defcap G6 () (enforce true "ok"))
+  (defconst GRID:[decimal] [0.0 0.01 1.0 7.5 100.0])
+  ;; the commission's floor, the launch value and the ceiling, as literals
+  (defconst COMMISSIONS:[decimal] [0.026931711082 0.05 1.0])
+  (defun cells:[object] ()
+    (fold (+) []
+      (map (lambda (c:decimal)
+        (fold (+) []
+          (map (lambda (p:decimal)
+            (fold (+) []
+              (map (lambda (b:decimal)
+                (map (lambda (t:decimal) {"p": p, "b": b, "t": t, "c": c}) GRID)) GRID))) GRID)))
+        COMMISSIONS)))
+  ;; every board but the empty one, which `bet` refuses below the minimum anyway
+  (defun boards:[object] ()
+    (filter (lambda (x:object) (> (+ (at 'p x) (+ (at 'b x) (at 't x))) 0.0)) (cells)))
+  ;; a board whose best slot pays LESS than it stakes: the gap the cover check guards
+  (defun gap:bool (x:object)
+    (< (cfh.vmax (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.board-vector (at 'p x) (at 'b x) (at 't x) (at 'c x)))
+       (+ (at 'p x) (+ (at 'b x) (at 't x)))))
+  ;; the same vector with the tie push removed: the tie slot pays 9t only
+  (defun no-push-gap:bool (x:object)
+    (let ((v (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.board-vector (at 'p x) (at 'b x) (at 't x) (at 'c x))))
+      (< (cfh.vmax [(at 0 v) (at 1 v) (* 9.0 (at 't x))])
+         (+ (at 'p x) (+ (at 'b x) (at 't x))))))
+  ;; the largest multiple k of a unit board (p0 b0 t0) that the table limit
+  ;; admits on a fresh round at share 1.0, times `lean` (just under or over 1)
+  (defun size:object (p0:decimal b0:decimal t0:decimal avail:decimal scale:decimal lean:decimal)
+    (let* ((unit (+ (cfh.vmax (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.board-vector p0 b0 t0 0.05))
+                    (* scale (+ (* 0.012350813289 p0) (+ (* 0.010579057843 b0) (* 0.143596287784 t0))))))
+           (k (* lean (/ avail unit))))
+      {"punto": (floor (* k p0) 12), "banco": (floor (* k b0) 12), "tie": (floor (* k t0) 12), "commission": 1.0 })))
+(commit-tx)
+
+(begin-tx)
+(expect "CF-6a the grid really was inspected: 124 boards at each of 3 commissions" 372
+  (length (cf6.boards)))
+(expect "CF-6b NO board in the grid stakes more than its best slot pays" []
+  (filter (cf6.gap) (cf6.boards)))
+;; 🔴 CONTROL: the check above can fail. Strip the push from the tie slot and
+;; boards spread across Player and Banker open exactly roulette's gap.
+(expect "CF-6c CONTROL without the tie push, boards DO stake more than their best slot" true
+  (> (length (filter (cf6.no-push-gap) (cf6.boards))) 0))
+(expect "CF-6c1 CONTROL e.g. 100 on each of Player and Banker plus 7.5 on Tie" true
+  (cf6.no-push-gap {"p": 100.0, "b": 100.0, "t": 7.5, "c": 0.05}))
+(commit-tx)
+
+;; boards at the top of the share: each opens a fresh round sized to 99.9% of the
+;; table limit, is ACCEPTED, and adds a reserve no larger than `available`; the
+;; same shape at 100.1% is refused by the TABLE LIMIT. The shapes are the ones
+;; roulette's gap came from -- spread across the table -- and each single slot.
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER cfh.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 100000.0)]}
+          ,{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER cfh.BOBBY (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 100000.0)]}])
+(module cf6x GX (defcap GX () (enforce true "ok"))
+  ;; place `w` for `who`; return what the bet added to `reserved` and the
+  ;; available pot it was measured against
+  (defun place:object (who:string w:object)
+    (let* ((res0 (at 'reserved (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+           (avail (at 'available (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)))
+           (msg (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet who w))
+           (res1 (at 'reserved (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params))))
+      {"msg": msg, "added": (- res1 res0), "avail": avail})))
+
+(begin-tx)
+(let* ((p (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)) (a (at 'available p)) (s (at 'fee-scale-now p))
+       (o (cf6x.place cfh.ALICE (cf6.size 1.0 1.0 0.05555555555 a s 0.999)))
+       (r (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 2)))
+  (expect "CF-6d the share really is the whole spare pot" 1.0 (at 'frac-at-open r))
+  (expect "CF-6d1 [P+B+T/18] the spread board at the top of the share is ACCEPTED" "bet placed in round 2" (at 'msg o))
+  (expect "CF-6d2 [P+B+T/18] its reserve is exposure-driven: max(exposure) >= stake" true
+    (>= (cfh.vmax (at 'exposure r)) (at 'stake r)))
+  (expect "CF-6d3 [P+B+T/18] what it added to the reserve is covered by the available pot" true
+    (<= (at 'added o) (at 'avail o)))
+  (expect "CF-6d4 [P+B+T/18] and it really is at the top: it used over 99% of the pot" true
+    (> (at 'added o) (* 0.99 (at 'avail o)))))
+(rollback-tx)
+(begin-tx)
+(let* ((p (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)))
+  (expect-failure "CF-6e [P+B+T/18] the next hair is refused by the TABLE LIMIT, not the cover check"
+    "would exceed the table limit"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet cfh.ALICE (cf6.size 1.0 1.0 0.05555555555 (at 'available p) (at 'fee-scale-now p) 1.001))))
+(rollback-tx)
+(begin-tx)
+(let* ((p (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)) (a (at 'available p)) (s (at 'fee-scale-now p))
+       (o (cf6x.place cfh.ALICE (cf6.size 1.0 1.0 0.0 a s 0.999))))
+  (expect "CF-6f [P+B] accepted at the top of the share" "bet placed in round 2" (at 'msg o))
+  (expect "CF-6f1 [P+B] added reserve <= available" true (<= (at 'added o) (at 'avail o))))
+(rollback-tx)
+(begin-tx)
+(let* ((p (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)))
+  (expect-failure "CF-6f2 [P+B] the next hair is refused by the table limit"
+    "would exceed the table limit"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet cfh.ALICE (cf6.size 1.0 1.0 0.0 (at 'available p) (at 'fee-scale-now p) 1.001))))
+(rollback-tx)
+(begin-tx)
+(let* ((p (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)) (a (at 'available p)) (s (at 'fee-scale-now p))
+       (o (cf6x.place cfh.ALICE (cf6.size 1.0 1.0 1.0 a s 0.999))))
+  (expect "CF-6g [P+B+T] accepted at the top of the share" "bet placed in round 2" (at 'msg o))
+  (expect "CF-6g1 [P+B+T] added reserve <= available" true (<= (at 'added o) (at 'avail o))))
+(rollback-tx)
+(begin-tx)
+(let* ((p (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)))
+  (expect-failure "CF-6g2 [P+B+T] the next hair is refused by the table limit"
+    "would exceed the table limit"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet cfh.ALICE (cf6.size 1.0 1.0 1.0 (at 'available p) (at 'fee-scale-now p) 1.001))))
+(rollback-tx)
+;; each single slot at the top of the share
+(begin-tx)
+(let* ((p (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)) (a (at 'available p)) (s (at 'fee-scale-now p))
+       (o (cf6x.place cfh.ALICE (cf6.size 1.0 0.0 0.0 a s 0.999))))
+  (expect "CF-6h [punto] accepted at the top, added reserve <= available" true
+    (and (= "bet placed in round 2" (at 'msg o)) (<= (at 'added o) (at 'avail o)))))
+(rollback-tx)
+(begin-tx)
+(let* ((p (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)) (a (at 'available p)) (s (at 'fee-scale-now p))
+       (o (cf6x.place cfh.ALICE (cf6.size 0.0 1.0 0.0 a s 0.999))))
+  (expect "CF-6i [banco] accepted at the top, added reserve <= available" true
+    (and (= "bet placed in round 2" (at 'msg o)) (<= (at 'added o) (at 'avail o)))))
+(rollback-tx)
+(begin-tx)
+(let* ((p (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)) (a (at 'available p)) (s (at 'fee-scale-now p))
+       (o (cf6x.place cfh.ALICE (cf6.size 0.0 0.0 1.0 a s 0.999))))
+  (expect "CF-6j [tie] accepted at the top, added reserve <= available" true
+    (and (= "bet placed in round 2" (at 'msg o)) (<= (at 'added o) (at 'avail o)))))
+(rollback-tx)
+
+;; (3) above: a JOIN into a round that already holds reserve. Alice opens the
+;; round with half the share on Player; Bob fills the rest with the spread
+;; board. The second bet's added reserve is still inside `available`, and one
+;; hair more is refused by the table limit.
+(begin-tx)
+(let* ((p (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)) (a (at 'available p)) (s (at 'fee-scale-now p))
+       (o1 (cf6x.place cfh.ALICE (cf6.size 1.0 0.0 0.0 a s 0.5)))
+       (p2 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status))
+       (r  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 2))
+       ;; the room left under the cap, which is f0 * min(available, a0)
+       (room (- (* (at 'frac-at-open r) (if (< (at 'available p2) (at 'avail-at-open r)) (at 'available p2) (at 'avail-at-open r)))
+                (+ (cfh.vmax (at 'exposure r)) (at 'fee-owed r))))
+       ;; Bob's spread board adds 2 per unit to Player's slot, which already holds the max
+       (w (cf6.size 1.0 1.0 0.05555555555 room (at 'fee-scale-now p2) 0.999))
+       (o2 (cf6x.place cfh.BOBBY w)))
+  (expect "CF-6k Alice's half-share board opened the round" "bet placed in round 2" (at 'msg o1))
+  (expect "CF-6k1 Bob's spread board JOINS a round that already holds reserve" "bet placed in round 2" (at 'msg o2))
+  (expect "CF-6k2 PRECONDITION the round held reserve before Bob's bet" true (> (at 'reserve r) 0.0))
+  (expect "CF-6k3 what Bob's bet added is covered by the available pot" true (<= (at 'added o2) (at 'avail o2)))
+  (expect "CF-6k4 and the round's whole reserve is inside the pot it opened against" true
+    (<= (at 'reserve (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 2)) (at 'avail-at-open r))))
+(rollback-tx)
+(env-sigs [])
+
+(print "baccarat cap-floor suite complete: both operands of the table limit are pinned on every slot")
+
+;; ============================================================================
+;; CF-7  A SLOT THE BOX DOES NOT LOAD STILL BOUNDS IT (the zero-cost slot)
+;;   At the floor commission the Banker fee per unit is exactly 0, so on the
+;;   Player slot a Banker unit costs nothing: cost 0, and that slot is skipped by
+;;   the smallest-bound rule. When the pot has shrunk until the round already
+;;   stands over its limit on Player, `bet` refuses EVERY board on Banker, and the
+;;   published maximum must say 0.0, not the positive figure the other two slots
+;;   would allow. One transaction, rolled back.
+;; ============================================================================
+(env-chain-data { "block-time": (time "2028-01-01T00:00:00Z") })
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}
+          ,{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER cfh.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 100000.0)]}
+          ,{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER cfh.BOBBY (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 100000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.set-params 0.02 0.01 100000.0 120.0 120.0 n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.MIN-COMMISSION 52)
+(expect "CF-7 PRECONDITION the Banker fee per unit is exactly 0 at the floor commission" 0.0
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.banco-edge n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.MIN-COMMISSION))
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet cfh.ALICE (cfh.on-slot 0 40.0))
+(let ((r (cfh.cur-round)))
+  (expect "CF-7 PRECONDITION the new round opened at the floor commission" n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.MIN-COMMISSION (at 'commission-at-open r))
+  (expect "CF-7 PRECONDITION and Player's slot carries 80" 80.0 (at 0 (at 'exposure r))))
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.withdraw-house (- (at 'available (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)) 3000.0))
+(let* ((p (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status)) (r (cfh.cur-round)) (a0 (at 'avail-at-open r))
+       (cap (* (at 'frac-at-open r) (if (< (at 'available p) a0) (at 'available p) a0))))
+  (expect "CF-7a PRECONDITION the round now stands over its limit on Player" true
+    (> (+ (at 0 (at 'exposure r)) (at 'fee-owed r)) cap))
+  ;; the CONTROL that makes this a pin: the Tie slot still has room, so only the
+  ;; Player slot -- the one a Banker unit does not load -- forbids the board. At a
+  ;; smaller pot the Tie slot's room goes negative too and the old rule already said 0.0.
+  (expect "CF-7b CONTROL the Tie slot still has room, so only the zero-cost Player slot forbids a Banker board" true
+    (> (- cap (+ (at 'fee-owed r) (at 2 (at 'exposure r)))) 0.0))
+  (expect "CF-7b1 CONTROL and the Banker slot alone would admit a board" true
+    (> (floor (/ (- cap (+ (at 'fee-owed r) (at 1 (at 'exposure r)))) (- 2.0 n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.MIN-COMMISSION)) 12) 0.01))
+  (expect "CF-7c so the published Banker maximum is 0.0" 0.0 (at 'max-banco-bet p))
+  (expect "CF-7c1 and Player's" 0.0 (at 'max-punto-bet p))
+  (expect "CF-7c2 and Tie's" 0.0 (at 'max-tie-bet p))
+  (expect "CF-7d the sizing figure is untouched by the round's state: 3000/250" 12.0 (at 'sized-banco-bet p)))
+(expect-failure "CF-7e a Banker board at the table minimum is refused by the table limit"
+  "would exceed the table limit"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet cfh.BOBBY (cfh.on-slot 1 0.01)))
+(rollback-tx)
+(env-sigs [])

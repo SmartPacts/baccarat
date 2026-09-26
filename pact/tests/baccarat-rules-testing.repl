@@ -1,0 +1,502 @@
+;; baccarat-rules-testing.repl — EXHAUSTIVE rules-conformance proof for
+;; n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat against OFFICIAL Punto Banco.
+;;
+;; Official source: https://en.wikipedia.org/wiki/Baccarat — card values,
+;; mod-10 totals, the natural 8/9 short-circuit, the player third-card rule,
+;; the FULL banker tableau, banker-plays-as-player when the player stands,
+;; and the payouts (Player 1:1, Banker 19:20 i.e. 0.95:1 at 5% commission,
+;; Tie 8:1).
+;;
+;; TIE interpretation: on a tie the live-table convention leaves Player/Banker
+;; bets in place for the next game. In a per-coup settled game the economic
+;; equivalent (and what a player who walks away receives) is the stake RETURNED,
+;; i.e. a PUSH. That is what is tested here: the tie bet pays 8:1 and the
+;; Player/Banker stakes come back.
+;;
+;; Method: `coup-from-cards` deals off the FRONT of an ordered list: P,B,P,B,
+;; then the player's third from index 4 if the player draws, then the banker's
+;; third from the next unused index (5 if the player drew, 4 if the player
+;; stood). Hand-ordering six cards therefore constructs ANY exact coup:
+;;   - a 10x10 matrix over all (player, banker) two-card totals proves the
+;;     natural short-circuit (incl. winner) and the player draw rule 0-5/6-7;
+;;   - an 8x10 matrix over all (banker total 0-7) x (player 3rd card 0-9)
+;;     proves EVERY cell of the official banker tableau, transcribed below
+;;     verbatim from the official source as H/S strings;
+;;   - a 2x8 matrix proves the banker-acts-as-player branch when the player
+;;     stands on 6/7.
+;; Each matrix has a CONTROL: a deliberately wrong rule fed to the same checker
+;; must produce exactly the predicted failing cells, so an empty list is proven
+;; to mean "conforms" and not "checked nothing".
+;; B9 covers the draw itself (`draw-cards`, `kind-at`, `adjust`, `restore`): the
+;; pure functions that turn a seed into six cards from the public pool.
+;; No beacon, no money flow — pure rules functions only, all callable without a
+;; capability.
+
+(load "baccarat-test-init.repl")
+
+;; ============================================================================
+;; Harness module (test-only; never deployed)
+;; ============================================================================
+;; WHY: the matrices need helpers that build a six-card list for an exact coup
+;; and check one cell; a module is the only place a REPL can define them.
+(begin-tx "define the coup-construction harness")
+(namespace "smartpacts")
+(module brules GG
+  (defcap GG () (enforce true "ok"))
+
+  ; The OFFICIAL banker tableau (Wikipedia), row = banker two-card total 0..7,
+  ; column = player's third-card VALUE 0..9. H = banker draws, S = stands.
+  (defconst TABLEAU:[string]
+    [ "HHHHHHHHHH"   ; banker 0: always draws
+      "HHHHHHHHHH"   ; banker 1: always draws
+      "HHHHHHHHHH"   ; banker 2: always draws
+      "HHHHHHHHSH"   ; banker 3: draws unless player 3rd = 8
+      "SSHHHHHHSS"   ; banker 4: draws on 2-7
+      "SSSSHHHHSS"   ; banker 5: draws on 4-7
+      "SSSSSSHHSS"   ; banker 6: draws on 6-7
+      "SSSSSSSSSS" ]); banker 7: always stands
+
+  ; CONTROL tableau: one cell wrong (banker 3 vs player 3rd = 8 flipped to H).
+  (defconst BAD-TABLEAU:[string]
+    [ "HHHHHHHHHH" "HHHHHHHHHH" "HHHHHHHHHH" "HHHHHHHHHH"
+      "SSHHHHHHSS" "SSSSHHHHSS" "SSSSSSHHSS" "SSSSSSSSSS" ])
+
+  ; Two-card hand totalling t (0..9): first card carries the value, KD (0) fills.
+  (defun h2:[string] (t:integer)
+    (if (= t 0) ["10C" "KD"]
+        (if (= t 1) ["AC" "KD"]
+            [(format "{}C" [t]) "KD"])))
+
+  ; A single card with baccarat value v (0..9) in suit s.
+  (defun cv:string (v:integer s:string)
+    (if (= v 0) (format "K{}" [s])
+        (if (= v 1) (format "A{}" [s])
+            (format "{}{}" [v s]))))
+
+  ; Exactly six cards (the minimum the deal accepts), in deal order.
+  (defun cards6:[string] (p:[string] b:[string] c4:string c5:string)
+    [(at 0 p) (at 0 b) (at 1 p) (at 1 b) c4 c5])
+
+  ; One constructed coup: player total pt, banker bt, index-4 card of value v4
+  ; in hearts, index-5 card "9S".
+  (defun coup:object (pt:integer bt:integer v4:integer)
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.coup-from-cards
+      (cards6 (h2 pt) (h2 bt) (cv v4 "H") "9S")))
+
+  (defun total:integer (hand:[string])
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.hand-total hand))
+
+  ; Cartesian grid of [a b] cells.
+  (defun grid:list (as:[integer] bs:[integer])
+    (fold (+) []
+      (map (lambda (a:integer) (map (lambda (b:integer) [a b]) bs)) as)))
+
+  ; NATURAL + PLAYER-RULE cell (pt, bt both 0..9), player draw ceiling pd
+  ; (official: 5). A natural (either total 8/9) ends the coup at two cards each,
+  ; used 4, winner by comparison; otherwise the player draws exactly when
+  ; pt <= pd, and a drawn card is the index-4 card "7H".
+  (defun natural-cell-ok:bool (pd:integer pt:integer bt:integer)
+    (let* ((r (coup pt bt 7))
+           (nat (or (>= pt 8) (>= bt 8)))
+           (plen (length (at 'punto r)))
+           (blen (length (at 'banco r)))
+           (w (at 'winner r)))
+      (if nat
+          (and (and (= 2 plen) (= 2 blen))
+               (and (= 4 (at 'used r))
+                    (= w (if (= pt bt) "tie" (if (> pt bt) "punto" "banco")))))
+          (if (<= pt pd)
+              (and (= plen 3) (= "7H" (at 2 (at 'punto r))))
+              (= plen 2)))))
+  (defun natural-failures:list (pd:integer)
+    (filter (lambda (c:[integer])
+              (not (natural-cell-ok pd (at 0 c) (at 1 c))))
+            (grid (enumerate 0 9) (enumerate 0 9))))
+
+  ; TABLEAU cell (bt 0..7, p3v 0..9), player fixed at 4 so they always draw the
+  ; index-4 card (value p3v, hearts). The banker must draw exactly when the
+  ; tableau cell is H, and then draw the index-5 card "9S"; `used` is 6 on a
+  ; banker draw and 5 on a stand; both final totals must be exact — which also
+  ; proves the player's third card is read at its face VALUE.
+  (defun tableau-cell-ok:bool (tab:[string] bt:integer p3v:integer)
+    (let* ((r (coup 4 bt p3v))
+           (cell (take 1 (drop p3v (at bt tab))))
+           (bdrew (= 3 (length (at 'banco r)))))
+      (and (and (and (= 3 (length (at 'punto r)))
+                     (= (at 2 (at 'punto r)) (cv p3v "H")))
+                (= (total (at 'punto r)) (mod (+ 4 p3v) 10)))
+           (and (and (= bdrew (= cell "H"))
+                     (= (at 'used r) (if bdrew 6 5)))
+                (and (= (total (at 'banco r)) (if bdrew (mod (+ bt 9) 10) bt))
+                     (if bdrew (= "9S" (at 2 (at 'banco r))) true))))))
+  (defun tableau-failures:list (tab:[string])
+    (filter (lambda (c:[integer])
+              (not (tableau-cell-ok tab (at 0 c) (at 1 c))))
+            (grid (enumerate 0 7) (enumerate 0 9))))
+
+  ; PLAYER-STANDS cell (pt 6..7, bt 0..7), banker draw ceiling bd (official: 5).
+  ; The banker regards only their own hand and plays the PLAYER rule. When the
+  ; player stood, the banker's third is the index-4 card ("3H", value 3), NOT
+  ; index 5 ("9S", value 9) — the two values differ so the total tells them apart.
+  (defun pstand-cell-ok:bool (bd:integer pt:integer bt:integer)
+    (let* ((r (coup pt bt 3))
+           (bdrew (= 3 (length (at 'banco r)))))
+      (and (and (= 2 (length (at 'punto r)))
+                (= bdrew (<= bt bd)))
+           (and (= (at 'used r) (if bdrew 5 4))
+                (and (= (total (at 'banco r)) (if bdrew (mod (+ bt 3) 10) bt))
+                     (if bdrew (= "3H" (at 2 (at 'banco r))) true))))))
+  (defun pstand-failures:list (bd:integer)
+    (filter (lambda (c:[integer])
+              (not (pstand-cell-ok bd (at 0 c) (at 1 c))))
+            (grid [6 7] (enumerate 0 7))))
+
+  ; Independent recomputation of the pool index of draw i (the test's own copy
+  ; of the documented rule: hash("<seed>|<i>") as base64 integer, mod remaining).
+  (defun index-of:integer (seed:integer i:integer remaining:integer)
+    (mod (str-to-int 64 (hash (format "{}|{}" [seed i]))) remaining)))
+(commit-tx)
+
+;; ============================================================================
+;; B1 — card values: A=1, 2-9 face, 10/J/Q/K = 0; the 52 kinds; the full shoe
+;; ============================================================================
+;; WHY: every total in the game is built from VALUE-OF. Each rank is pinned to a
+;; literal in all four suits, and the whole shoe's pip mass is recomputed from
+;; KINDS x the copies per kind, so a single wrong entry anywhere moves it.
+(begin-tx "B1: card values")
+(expect "B1a ace counts 1 (all suits)"   [1 1 1 1] (map (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.card-value) ["AS" "AH" "AD" "AC"]))
+(expect "B1b two counts 2 (all suits)"   [2 2 2 2] (map (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.card-value) ["2S" "2H" "2D" "2C"]))
+(expect "B1c three counts 3 (all suits)" [3 3 3 3] (map (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.card-value) ["3S" "3H" "3D" "3C"]))
+(expect "B1d four counts 4 (all suits)"  [4 4 4 4] (map (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.card-value) ["4S" "4H" "4D" "4C"]))
+(expect "B1e five counts 5 (all suits)"  [5 5 5 5] (map (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.card-value) ["5S" "5H" "5D" "5C"]))
+(expect "B1f six counts 6 (all suits)"   [6 6 6 6] (map (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.card-value) ["6S" "6H" "6D" "6C"]))
+(expect "B1g seven counts 7 (all suits)" [7 7 7 7] (map (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.card-value) ["7S" "7H" "7D" "7C"]))
+(expect "B1h eight counts 8 (all suits)" [8 8 8 8] (map (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.card-value) ["8S" "8H" "8D" "8C"]))
+(expect "B1i nine counts 9 (all suits)"  [9 9 9 9] (map (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.card-value) ["9S" "9H" "9D" "9C"]))
+(expect "B1j ten counts 0 (all suits)"   [0 0 0 0] (map (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.card-value) ["10S" "10H" "10D" "10C"]))
+(expect "B1k jack counts 0 (all suits)"  [0 0 0 0] (map (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.card-value) ["JS" "JH" "JD" "JC"]))
+(expect "B1l queen counts 0 (all suits)" [0 0 0 0] (map (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.card-value) ["QS" "QH" "QD" "QC"]))
+(expect "B1m king counts 0 (all suits)"  [0 0 0 0] (map (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.card-value) ["KS" "KH" "KD" "KC"]))
+(expect "B1n there are 52 card kinds"
+  52 (length n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.KINDS))
+(expect "B1o the 52 kinds are distinct"
+  52 (length (distinct n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.KINDS)))
+; pool order is index = 4 * rank + suit; B9 names kinds by index, so pin three
+(expect "B1p kind order: 0 = AS, 7 = 2C, 51 = KC"
+  ["AS" "2C" "KC"]
+  (map (lambda (i:integer) (at i n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.KINDS)) [0 7 51]))
+(expect "B1q every kind values inside 0..9"
+  []
+  (filter (lambda (c:string)
+            (let ((v (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.card-value c)))
+              (or (< v 0) (> v 9))))
+          n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.KINDS))
+(expect "B1r the full shoe holds 8 copies of each of the 52 kinds"
+  (make-list 52 8) n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.FULL-SHOE)
+(expect "B1s the full shoe holds 416 cards"
+  416 (fold (+) 0 n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.FULL-SHOE))
+; per suit A+2+..+9 = 45; x4 suits = 180 per deck; x8 copies = 1440
+(expect "B1t whole-shoe pip mass = 1440, from KINDS x copies (every rank maps officially)"
+  1440
+  (fold (+) 0
+    (map (lambda (i:integer)
+           (* (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.card-value
+                (at i n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.KINDS))
+              (at i n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.FULL-SHOE)))
+         (enumerate 0 51))))
+(expect "B1u every kind's value is the official one, written out independently"
+  [1 1 1 1 2 2 2 2 3 3 3 3 4 4 4 4 5 5 5 5 6 6 6 6 7 7 7 7 8 8 8 8 9 9 9 9
+   0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+  (map (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.card-value) n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.KINDS))
+(commit-tx)
+
+;; ============================================================================
+;; B2 — hand-total: sum of card values mod 10 (wraparound)
+;; ============================================================================
+;; WHY: every rule below compares totals; the wrap at 10 is where a naive sum lies.
+(begin-tx "B2: hand totals mod 10")
+(expect "B2a 7+8=15 -> 5"    5 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.hand-total ["7H" "8D"]))
+(expect "B2b 9+K=9 -> 9"     9 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.hand-total ["9C" "KD"]))
+(expect "B2c 5+5=10 -> 0"    0 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.hand-total ["5S" "5H"]))
+(expect "B2d 9+9+9=27 -> 7"  7 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.hand-total ["9C" "9D" "9H"]))
+(expect "B2e 10+J=0 -> 0"    0 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.hand-total ["10C" "JD"]))
+(expect "B2f A+Q=1 -> 1"     1 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.hand-total ["AC" "QD"]))
+(expect "B2g 6+7+8=21 -> 1"  1 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.hand-total ["6C" "7D" "8H"]))
+(commit-tx)
+
+;; ============================================================================
+;; B3 — NATURAL 8/9 matrix + player rule: ALL 100 (pt, bt) two-card totals
+;; ============================================================================
+;; WHY: the natural check and the player's draw threshold decide every coup
+;; before the tableau is reached; all 100 two-card combinations are enumerated.
+(begin-tx "B3: natural matrix + player third-card rule")
+(expect "B3a the matrix really covers 100 cells"
+  100 (length (smartpacts.brules.grid (enumerate 0 9) (enumerate 0 9))))
+; For every (pt, bt): a natural ends the coup at two cards each, used 4, winner
+; by two-card comparison; otherwise the player draws exactly on 0-5.
+(expect "B3b naturals short-circuit + player draws iff total <= 5, for ALL 100 cells"
+  [] (smartpacts.brules.natural-failures 5))
+; CONTROL: a checker told the player draws on 6 must flag exactly pt=6 x bt 0..7.
+(expect "B3c CONTROL: a wrong draw ceiling (6) is caught in exactly its 8 cells"
+  [[6 0] [6 1] [6 2] [6 3] [6 4] [6 5] [6 6] [6 7]]
+  (smartpacts.brules.natural-failures 6))
+(let ((r (smartpacts.brules.coup 8 3 5)))
+  (expect "B3d player natural 8: no third card anywhere" [2 2]
+    [(length (at 'punto r)) (length (at 'banco r))])
+  (expect "B3e player natural 8 beats banker 3" "punto" (at 'winner r)))
+(let ((r (smartpacts.brules.coup 3 9 5)))
+  (expect "B3f banker natural 9: player does NOT draw despite 3<=5" 2
+    (length (at 'punto r)))
+  (expect "B3g banker natural 9 beats player 3" "banco" (at 'winner r)))
+(let ((r (smartpacts.brules.coup 9 9 5)))
+  (expect "B3h equal naturals 9-9 tie" "tie" (at 'winner r)))
+(let ((r (smartpacts.brules.coup 8 9 5)))
+  (expect "B3i natural 9 beats natural 8" "banco" (at 'winner r)))
+(let ((r (smartpacts.brules.coup 5 0 5)))
+  (expect "B3j player 5 draws (the ceiling)" 3 (length (at 'punto r))))
+(let ((r (smartpacts.brules.coup 6 0 5)))
+  (expect "B3k player 6 stands (one above the ceiling)" 2 (length (at 'punto r))))
+(commit-tx)
+
+;; ============================================================================
+;; B4 — THE BANKER TABLEAU: every (banker 0-7) x (player 3rd card 0-9) cell
+;; ============================================================================
+;; WHY: the tableau is the part of Punto Banco most often implemented wrong;
+;; every one of its 80 cells is checked against the transcription above.
+(begin-tx "B4: full banker tableau, 80 cells")
+(expect "B4a tableau transcription is well-formed (8 rows of 10 cells)"
+  [10 10 10 10 10 10 10 10] (map (length) smartpacts.brules.TABLEAU))
+(expect "B4b the matrix really covers 80 cells"
+  80 (length (smartpacts.brules.grid (enumerate 0 7) (enumerate 0 9))))
+; For every cell: banker draws iff the OFFICIAL tableau says H, takes index 5,
+; `used` is 6/5 accordingly, and both final totals are exact.
+(expect "B4c banker draw/stand matches the official tableau for ALL 80 cells"
+  [] (smartpacts.brules.tableau-failures smartpacts.brules.TABLEAU))
+; CONTROL: the same checker against a tableau with ONE wrong cell flags that cell only.
+(expect "B4d CONTROL: a one-cell-wrong tableau is caught at exactly that cell"
+  [[3 8]] (smartpacts.brules.tableau-failures smartpacts.brules.BAD-TABLEAU))
+(let ((r (smartpacts.brules.coup 4 3 8)))
+  (expect "B4e banker 3 vs player 3rd = 8: STANDS" 2 (length (at 'banco r))))
+(let ((r (smartpacts.brules.coup 4 3 9)))
+  (expect "B4f banker 3 vs player 3rd = 9: draws" 3 (length (at 'banco r))))
+(let ((r (smartpacts.brules.coup 4 6 6)))
+  (expect "B4g banker 6 vs player 3rd = 6: draws" 3 (length (at 'banco r))))
+(let ((r (smartpacts.brules.coup 4 6 5)))
+  (expect "B4h banker 6 vs player 3rd = 5: STANDS" 2 (length (at 'banco r))))
+(let ((r (smartpacts.brules.coup 4 7 7)))
+  (expect "B4i banker 7 always stands (even vs 3rd = 7)" 2 (length (at 'banco r))))
+(let ((r (smartpacts.brules.coup 0 2 0)))
+  (expect "B4j banker 2 always draws (even vs 3rd = 0)" 3 (length (at 'banco r))))
+(commit-tx)
+
+;; ============================================================================
+;; B5 — player stands (6/7): banker regards only their own hand, player rule
+;; ============================================================================
+;; WHY: when the player stands there is no third card to consult, and the
+;; banker's third card comes from index 4, not 5 — both are checked per cell.
+(begin-tx "B5: player-stands branch, 16 cells")
+(expect "B5a the matrix really covers 16 cells"
+  16 (length (smartpacts.brules.grid [6 7] (enumerate 0 7))))
+(expect "B5b banker plays the player rule in ALL 16 player-stands cells"
+  [] (smartpacts.brules.pstand-failures 5))
+; CONTROL: a checker told the banker draws on 6 must flag exactly bt=6 for pt 6 and 7.
+(expect "B5c CONTROL: a wrong banker ceiling (6) is caught in exactly its 2 cells"
+  [[6 6] [7 6]] (smartpacts.brules.pstand-failures 6))
+(let ((r (smartpacts.brules.coup 6 5 9)))
+  (expect "B5d player 6 stands; banker 5 draws" [2 3]
+    [(length (at 'punto r)) (length (at 'banco r))]))
+(let ((r (smartpacts.brules.coup 7 6 9)))
+  (expect "B5e player 7 stands; banker 6 stands (two cards each)" [2 2]
+    [(length (at 'punto r)) (length (at 'banco r))]))
+(commit-tx)
+
+;; ============================================================================
+;; B6 — winner determination on final (post-draw) totals
+;; ============================================================================
+;; WHY: the winner must come from the FINAL totals, after any third cards.
+(begin-tx "B6: winner by final mod-10 totals")
+; TIE with three player cards: P 4 draws 3 -> 7; B 7 stands -> 7.
+(let ((r (smartpacts.brules.coup 4 7 3)))
+  (expect "B6a final totals 7-7 -> tie" "tie" (at 'winner r))
+  (expect "B6b punto total is the drawn 7" 7 (smartpacts.brules.total (at 'punto r)))
+  (expect "B6c banco total stands at 7" 7 (smartpacts.brules.total (at 'banco r))))
+; PUNTO: P 5 draws 4 -> 9; B 6 vs p3=4 stands -> 6.
+(let ((r (smartpacts.brules.coup 5 6 4)))
+  (expect "B6d 9 beats 6 -> punto" "punto" (at 'winner r)))
+; BANCO: P 1 draws K(0) -> 1; B 6 vs p3=0 stands -> 6.
+(let ((r (smartpacts.brules.coup 1 6 0)))
+  (expect "B6e 6 beats 1 -> banco" "banco" (at 'winner r)))
+; A third card that flips the result: P 2 draws 7 -> 9; B 5 vs p3=7 draws 9S -> 4.
+(let ((r (smartpacts.brules.coup 2 5 7)))
+  (expect "B6f 9 beats a drawn 4 -> punto" "punto" (at 'winner r)))
+(commit-tx)
+
+;; ============================================================================
+;; B7 — payouts: Player 1:1, Banker 0.95:1 (5% commission), Tie 8:1 + PUSH
+;; ============================================================================
+;; WHY: board-vector feeds both the reserved exposure and the claim, so its
+;; three slots ARE the payout table; board-payout picks the winner's slot.
+(begin-tx "B7: payouts incl. the tie push")
+(expect "B7a mixed board {10, 5, 2} at commission 0.05 -> [20.0 9.75 33.0]"
+  [20.0 9.75 33.0]
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.board-vector 10.0 5.0 2.0 0.05))
+(expect "B7b punto wins: punto 10 returns 20 (1:1); banco 5 + tie 2 lose"
+  20.0 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.board-payout 10.0 5.0 2.0 0.05 "punto"))
+(expect "B7c banco wins: banco 5 returns 5 + 4.75 = 9.75 (0.95:1); punto + tie lose"
+  9.75 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.board-payout 10.0 5.0 2.0 0.05 "banco"))
+(expect "B7d tie: tie 2 returns 18 (8:1) AND punto 10 + banco 5 PUSH -> 33"
+  33.0 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.board-payout 10.0 5.0 2.0 0.05 "tie"))
+(expect "B7e pure punto 7.5 on a tie pushes: full stake back"
+  7.5 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.board-payout 7.5 0.0 0.0 0.05 "tie"))
+(expect "B7f pure banco 4.2 on a tie pushes: full stake back"
+  4.2 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.board-payout 0.0 4.2 0.0 0.05 "tie"))
+(expect "B7g pure tie bet loses when punto wins"
+  0.0 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.board-payout 0.0 0.0 3.0 0.05 "punto"))
+(expect "B7h pure tie 3 on a tie returns 27 (8:1 plus stake)"
+  27.0 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.board-payout 0.0 0.0 3.0 0.05 "tie"))
+(expect "B7i pure punto loses when banco wins"
+  0.0 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.board-payout 7.5 0.0 0.0 0.05 "banco"))
+(expect-failure "B7j an unknown outcome is refused"
+  "not an outcome"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.board-payout 1.0 1.0 1.0 0.05 "draw"))
+(commit-tx)
+
+;; ============================================================================
+;; B8 — the deal off an ordered list: `used`, exact hands, the six-card floor
+;; ============================================================================
+;; WHY: resolve restores every card a coup did not use, so `used` decides the
+;; pool's composition for every later coup; each of its four shapes is pinned
+;; with the exact card names in deal order, and the short-list guard is proven.
+(begin-tx "B8: used counts, exact hands, short lists refused")
+; natural: P 9S+KD = 9, B 2H+3C = 5 -> ends on four cards
+(expect "B8a natural: used 4, hands in deal order, punto wins"
+  { "winner": "punto", "punto": ["9S" "KD"], "banco": ["2H" "3C"], "used": 4 }
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.coup-from-cards ["9S" "2H" "KD" "3C" "4S" "5H"]))
+; player draws, banker stands: P AS+3D = 4 draws 5S -> 9; B 2H+4C = 6 vs 5 stands
+(expect "B8b player draws index 4, banker stands: used 5"
+  { "winner": "punto", "punto": ["AS" "3D" "5S"], "banco": ["2H" "4C"], "used": 5 }
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.coup-from-cards ["AS" "2H" "3D" "4C" "5S" "6H"]))
+; player stands, banker draws: P 6S+KD = 6; B AH+4C = 5 draws INDEX 4 (7S) -> 2; 8H untouched
+(expect "B8c player stands, banker draws index 4 (not 5): used 5"
+  { "winner": "punto", "punto": ["6S" "KD"], "banco": ["AH" "4C" "7S"], "used": 5 }
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.coup-from-cards ["6S" "AH" "KD" "4C" "7S" "8H"]))
+; both draw: P 2S+AD = 3 draws 9S -> 2; B 3H+QC = 3 vs 9 draws 4H -> 7
+(expect "B8d both draw (player index 4, banker index 5): used 6"
+  { "winner": "banco", "punto": ["2S" "AD" "9S"], "banco": ["3H" "QC" "4H"], "used": 6 }
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.coup-from-cards ["2S" "3H" "AD" "QC" "9S" "4H"]))
+; both stand without a natural: P 7S+KD = 7, B 6H+QC = 6
+(expect "B8e both stand on 7 / 6: used 4"
+  { "winner": "punto", "punto": ["7S" "KD"], "banco": ["6H" "QC"], "used": 4 }
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.coup-from-cards ["7S" "6H" "KD" "QC" "AS" "AH"]))
+; cards past the sixth are never read
+(expect "B8f a seventh card changes nothing"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.coup-from-cards ["2S" "3H" "AD" "QC" "9S" "4H"])
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.coup-from-cards ["2S" "3H" "AD" "QC" "9S" "4H" "KS"]))
+(expect-failure "B8g a five-card list is refused (even though a natural would use four)"
+  "a coup needs six cards to draw from"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.coup-from-cards ["9S" "2H" "KD" "3C" "4S"]))
+(expect-failure "B8h an empty list is refused"
+  "a coup needs six cards to draw from"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.coup-from-cards []))
+; CONTROL for B8g: the same cards plus one reach the floor and deal (B8a)
+(expect "B8i CONTROL: exactly six cards is accepted"
+  4 (at 'used (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.coup-from-cards ["9S" "2H" "KD" "3C" "4S" "5H"])))
+(commit-tx)
+
+;; ============================================================================
+;; B9 — THE DRAW: draw-cards, kind-at, adjust, restore on the public pool
+;; ============================================================================
+;; WHY: the seed-to-cards step decides every coup. It must be deterministic,
+;; take exactly six cards out of the pool, pick each by the documented index
+;; rule (recomputed here independently), never deal a kind the pool has run out
+;; of, and give back unused cards without creating or losing any.
+(begin-tx "B9: the draw")
+(let* ((seed 88253437839257473828433993246226848098264016224734981937473364725536594384013)
+       (full n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.FULL-SHOE)
+       (d (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.draw-cards full 416 seed))
+       (d2 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.draw-cards full 416 seed))
+       (kinds (at 'kinds d)))
+  (expect "B9a deterministic: the same pool and seed draw the same result twice" d d2)
+  (expect "B9b six kinds are drawn" 6 (length kinds))
+  (expect "B9c six names, each the KINDS entry of its kind"
+    (map (lambda (k:integer) (at k n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.KINDS)) kinds)
+    (at 'cards d))
+  (expect "B9d the names list has six entries" 6 (length (at 'cards d)))
+  (expect "B9e remaining is 410" 410 (at 'remaining d))
+  (expect "B9f the counts after sum to 410" 410 (fold (+) 0 (at 'counts d)))
+  (expect "B9g adding the six kinds back restores FULL-SHOE (exactly those were decremented)"
+    full (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.restore (at 'counts d) kinds))
+  (expect "B9h CONTROL: the pool after the draw differs from FULL-SHOE"
+    false (= full (at 'counts d)))
+  (expect "B9i the first card's kind matches an independent recomputation of its index"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.kind-at full
+      (mod (str-to-int 64 (hash (format "{}|{}" [seed 0]))) 416))
+    (at 0 kinds))
+  (expect "B9j the second card's kind: position 1, drawn from the pool minus the first"
+    (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.kind-at
+      (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.adjust full (at 0 kinds) -1)
+      (smartpacts.brules.index-of seed 1 415))
+    (at 1 kinds))
+  (expect "B9k CONTROL: a different seed draws different kinds"
+    false (= kinds (at 'kinds (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.draw-cards full 416 (+ seed 1))))))
+
+; kind-at walks the cumulative counts
+(expect "B9l kind-at r=0 on a full pool is kind 0"
+  0 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.kind-at n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.FULL-SHOE 0))
+(expect "B9m kind-at r=7 is still kind 0 (its last copy)"
+  0 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.kind-at n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.FULL-SHOE 7))
+(expect "B9n kind-at r=8 is kind 1 (the boundary)"
+  1 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.kind-at n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.FULL-SHOE 8))
+(expect "B9o kind-at r=415 on a full pool is kind 51"
+  51 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.kind-at n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.FULL-SHOE 415))
+(expect "B9p kind-at r=0 skips an empty kind 0 and lands on kind 1"
+  1 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.kind-at
+      (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.adjust n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.FULL-SHOE 0 -8) 0))
+
+; the six-card floor on the pool
+(expect-failure "B9q a pool of five cards cannot deal a coup"
+  "the pool cannot deal a coup"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.draw-cards (+ (make-list 5 1) (make-list 47 0)) 5 1))
+(expect "B9r CONTROL: a pool of exactly six cards deals all six"
+  [0 1 2 3 4 5]
+  (sort (at 'kinds (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.draw-cards (+ (make-list 6 1) (make-list 46 0)) 6 1))))
+
+; A depleted kind is never drawn. The ten seeds are offsets of the B9 seed
+; chosen because EACH of them draws kind 7 (2C) from the FULL pool (B9s, the
+; control); with kind 7 emptied (416 - 8 = 408 cards) none of them may.
+(let* ((seed 88253437839257473828433993246226848098264016224734981937473364725536594384013)
+       (seeds (map (lambda (o:integer) (+ seed o)) [36 38 41 45 56 63 65 81 82 97]))
+       (full n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.FULL-SHOE)
+       (empty7 (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.adjust full 7 -8))
+       (on-full (map (lambda (s:integer)
+                       (at 'kinds (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.draw-cards full 416 s)))
+                     seeds))
+       (on-empty7 (fold (+) []
+                    (map (lambda (s:integer)
+                           (at 'kinds (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.draw-cards empty7 408 s)))
+                         seeds))))
+  (expect "B9s CONTROL: each of the ten seeds draws kind 7 from the full pool"
+    [] (filter (lambda (ks:[integer]) (not (contains 7 ks))) on-full))
+  (expect "B9t the depleted pool has kind 7 at 0 and 408 cards"
+    [0 408] [(at 7 empty7) (fold (+) 0 empty7)])
+  (expect "B9u the ten draws inspected 60 kinds" 60 (length on-empty7))
+  (expect "B9v kind 7 never appears among the 60 kinds drawn from the depleted pool"
+    false (contains 7 on-empty7)))
+
+; adjust conserves: -1 then +1 is the identity, for every kind
+(expect "B9w adjust k -1 then +1 restores the pool, for all 52 kinds"
+  []
+  (filter (lambda (k:integer)
+            (!= n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.FULL-SHOE
+                (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.adjust
+                  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.adjust
+                    n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.FULL-SHOE k -1) k 1)))
+          (enumerate 0 51)))
+(expect "B9x adjust touches only kind k (kind 25 -1 moves one count, total 415)"
+  [7 8 8 415]
+  (let ((a (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.adjust
+             n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.FULL-SHOE 25 -1)))
+    [(at 25 a) (at 24 a) (at 26 a) (fold (+) 0 a)]))
+(commit-tx)
+
+(print "baccarat-rules-testing.repl: ALL PUNTO BANCO RULES CONFORMANCE CHECKS PASSED")

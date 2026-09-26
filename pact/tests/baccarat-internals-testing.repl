@@ -1,0 +1,186 @@
+;; baccarat-internals-testing.repl — WHAT A ROUND FREEZES IS WHAT THE ROW SAID.
+;;
+;; Pact has no `private`. Before deployment a separate `open-round` export, gated
+;; by an argument-free true-bodied token, opened rounds, and this suite drove it
+;; through a foreign module -- an export is a door, and a door can be reached by
+;; somebody other than the module that meant to use it. The opener is now INLINED in `bet`: a round opens only when a board
+;; arrives, and the module defines no export to reach. The absence is pinned by
+;; baccarat-open-round-must-fail.repl (a module naming it must fail to load) and
+;; read from the source by A-2 in the attacks suite.
+;;
+;; What this suite pins, through the only door left: every term a round freezes --
+;; the window, the share of the pot it may risk, the minimum, the beacon wait, the
+;; Banker COMMISSION and the CUT card -- comes out of the game row, which only
+;; ADMIN writes, never from the board that opened the round. A board carries three
+;; stakes and a commission CEILING; anything else on it is refused by the engine
+;; before a line of the module runs (IN-6).
+;;
+;; IN-0 is the control, and it is not optional: a board really does open a round,
+;; and the round it opens is the one after the last -- computed by the module,
+;; never named by the caller.
+
+(load "baccarat-test-init.repl")
+
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.initialize n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT 100000.0)
+(commit-tx)
+(env-sigs [{"key":"h0u5e00000000000000000000000000000000000000000000000000000000004"
+           ,"caps":[(coin.TRANSFER "house-funder" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 50000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.fund-house "house-funder" 50000.0)
+(commit-tx)
+(env-sigs [])
+
+(module inn IG (defcap IG () (enforce true "ok"))
+  (defconst ALICE "k:a11ce00000000000000000000000000000000000000000000000000000000001")
+  (defconst BOB   "k:b0b0000000000000000000000000000000000000000000000000000000000002"))
+
+;; ---------------------------------------------------------------- IN-0 control
+;; A board opens a round, and it is the round AFTER the last one.
+(env-chain-data { "block-time": (time "2027-03-01T00:00:00Z") })
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER inn.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 10.0)]}])
+(begin-tx)
+(expect "IN-0 PRECONDITION the last round opened is 0" 0 (at 'round-seq (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+(expect "IN-0 a board opens a round -- the first one" "bet placed in round 1"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet inn.ALICE { "punto": 10.0, "banco": 0.0, "tie": 0.0, "commission": 1.0 }))
+(expect "IN-0a which is the round AFTER the last one" 1 (at 'round-seq (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+(expect "IN-0b and the one now taking bets" 1 (at 'current (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+(commit-tx)
+(env-sigs [])
+
+;; ------------------------------------------- IN-1  the counter only ever ADVANCES
+;; The round number is round-seq + 1, read in the same call that writes it back,
+;; so a board has nothing to rewind WITH: after the close the next board opens
+;; the NEXT round, never the same one again.
+(env-chain-data { "block-time": (time "2027-03-01T00:02:01Z") })
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER inn.BOB (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 10.0)]}])
+(begin-tx)
+(expect "IN-1 a board after the close opens the NEXT round" "bet placed in round 2"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet inn.BOB { "punto": 10.0, "banco": 0.0, "tie": 0.0, "commission": 1.0 }))
+(expect "IN-1a the row agrees" 2 (at 'round-seq (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+(rollback-tx)
+(env-sigs [])
+
+;; ======================================================================
+;; IN-2..IN-9  WHAT A ROUND FREEZES IS WHAT THE ROW SAID
+;;   `set-params` writes the seven dials; the opening board reads them. Every
+;;   value below is deliberately NOT the launch one, so an opener that ignored
+;;   the row and hard-coded the deploy constants goes RED. Each carries its own
+;;   CONTROL showing the launch value would have written something different.
+;;   🔴 Each assertion is its own top-level form on purpose: several `expect`s
+;;   inside one `let` print a SINGLE trace line carrying the last one's label.
+;; ======================================================================
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(expect "IN-2 PRECONDITION the admin writes non-launch dials" "params set"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.set-params 0.5 7.0 100000.0 300.0 240.0 0.1 100))
+(commit-tx)
+(env-sigs [])
+
+;; round 1 closed at 00:02:00; bob's board at 00:10:00 opens round 2 under the new
+;; dials. The stake reaches the new 7.0 minimum and the board accepts the 10 %.
+;; IN-5b is read in the same transaction, BEFORE the board: the pot's unreserved
+;; balance at that instant is what the round must record as its headroom.
+(env-chain-data { "block-time": (time "2027-03-01T00:10:00Z") })
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER inn.BOB (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 10.0)]}])
+(begin-tx)
+(let ((avail-before (at 'available (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.pot-status))))
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet inn.BOB { "punto": 10.0, "banco": 0.0, "tie": 0.0, "commission": 1.0 })
+  (expect "IN-5b the round's headroom is the pot's own unreserved balance the instant it opened, recomputed by the module"
+    avail-before (at 'avail-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 2))))
+(expect "IN-2 PRECONDITION the board opened round 2 under those dials" 2 (at 'round-seq (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+(commit-tx)
+(env-sigs [])
+
+;; IN-2  the window
+(begin-tx)
+(expect "IN-2a the round closes exactly one row-window after it opened"
+  (add-time (time "2027-03-01T00:10:00Z") 300.0)
+  (at 'close-time (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 2)))
+(expect "IN-2b CONTROL the launch window would have closed it somewhere else" false
+  (= (add-time (time "2027-03-01T00:10:00Z") n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.LAUNCH-BET-WINDOW)
+     (at 'close-time (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 2))))
+(commit-tx)
+
+;; IN-3  the share of the pot this round may put at risk
+(begin-tx)
+(expect "IN-3 the round carries exactly the row's share" 0.5
+  (at 'frac-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 2)))
+(expect "IN-3a CONTROL the launch share is a different number" false
+  (= n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.LAUNCH-RESERVE-FRACTION (at 'frac-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 2))))
+(commit-tx)
+
+;; IN-4  the table minimum
+(begin-tx)
+(expect "IN-4 the round carries exactly the row's minimum" 7.0
+  (at 'min-bet-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 2)))
+(expect "IN-4a CONTROL the launch minimum is a different number" false
+  (= n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.LAUNCH-MIN-BET (at 'min-bet-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 2))))
+(commit-tx)
+
+;; IN-5  the beacon wait -- asserted as the exact beacon the row's wait pins from
+;; the close-time the module itself wrote, so a round pinned from any other number
+;; goes red here.
+(begin-tx)
+(expect "IN-5 the round is pinned to the beacon the row's wait names"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.round-at
+    (add-time (at 'close-time (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 2)) 240.0))
+  (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 2)))
+(expect "IN-5a CONTROL the launch wait would have pinned a DIFFERENT beacon" false
+  (= (n_48867b242317a0216a67f8c7ca26696b5878e0e3.drand.round-at
+       (add-time (at 'close-time (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 2)) n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.LAUNCH-DRAND-MARGIN))
+     (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 2))))
+(commit-tx)
+
+;; IN-8  the Banker commission: what every Banker board in the round is paid at
+(begin-tx)
+(expect "IN-8 the round carries exactly the row's commission" 0.1
+  (at 'commission-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 2)))
+(expect "IN-8a CONTROL the launch commission is a different number" false
+  (= n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.LAUNCH-COMMISSION (at 'commission-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 2))))
+(expect "IN-8b CONTROL and round 1, opened before set-params, kept the launch one" 0.05
+  (at 'commission-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 1)))
+(commit-tx)
+
+;; IN-9  the cut card: the pool size at which this round's coup refills the shoe
+(begin-tx)
+(expect "IN-9 the round carries exactly the row's cut" 100
+  (at 'cut-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 2)))
+(expect "IN-9a CONTROL the launch cut is a different number" false
+  (= n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.LAUNCH-CUT (at 'cut-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 2))))
+(expect "IN-9b CONTROL and round 1, opened before set-params, kept the launch one" 52
+  (at 'cut-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 1)))
+(commit-tx)
+
+;; ------------------------------- IN-6  a board cannot hand in ANY term
+;; A board is {punto, banco, tie, commission}: three stakes and a commission
+;; CEILING (a refusal bound, never the round's commission -- the unit suite's COM
+;; tests). A board carrying a window, a share, a minimum, a wait, a cut or a round
+;; number is refused by the engine's own type check before a line of the module
+;; runs, and opens nothing.
+;; 🔴 That refusal is the ENGINE's wording; it names this module's schema, which
+;; is what makes the string specific to this test.
+(env-chain-data { "block-time": (time "2027-03-01T00:20:00Z") })
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER inn.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 10.0)]}])
+(begin-tx)
+(expect-failure "IN-6 a board cannot name the round number"
+  "expected type object{n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.wager}"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet inn.ALICE { "punto": 10.0, "banco": 0.0, "tie": 0.0, "commission": 1.0, "seq": 1 }))
+(expect-failure "IN-6a nor the window, the share, the minimum and the wait"
+  "expected type object{n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.wager}"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet inn.ALICE { "punto": 10.0, "banco": 0.0, "tie": 0.0, "commission": 1.0, "bet-window": 1.0, "reserve-fraction": 1.0, "min-bet": 0.001, "drand-margin": 60.0 }))
+(expect-failure "IN-6b nor the cut"
+  "expected type object{n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.wager}"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet inn.ALICE { "punto": 10.0, "banco": 0.0, "tie": 0.0, "commission": 1.0, "cut-card": 26 }))
+(expect "IN-6c and no round was opened" 2 (at 'round-seq (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params)))
+(expect "IN-6d CONTROL the same board without the extra field opens round 3" "bet placed in round 3"
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet inn.ALICE { "punto": 10.0, "banco": 0.0, "tie": 0.0, "commission": 1.0 }))
+(rollback-tx)
+(env-sigs [])
+
+(print "baccarat internals suite complete: a round opens on the row's terms, never the board's")

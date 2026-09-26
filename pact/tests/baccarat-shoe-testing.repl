@@ -1,0 +1,150 @@
+;; baccarat-shoe-testing.repl — the pool, kind by kind.
+;;
+;; The oracle suite checks that the counts SUM to `remaining` after every coup. A
+;; module that put the wrong cards back would pass that: the total is right and
+;; the composition is wrong. This suite recomputes the pool independently -- every
+;; kind's count must be its previous count minus the number of times that kind
+;; appears in the two hands the round recorded -- after every coup, and across a
+;; refill.
+
+(load "baccarat-test-init.repl")
+
+(begin-tx)
+(module shoe-oracle SG (defcap SG () (enforce true "ok"))
+  (defconst ALICE "k:a11ce00000000000000000000000000000000000000000000000000000000001")
+  (defconst BOB   "k:b0b0000000000000000000000000000000000000000000000000000000000002")
+  ;; genuine evmnet beacons: 20801767 (17:46:13Z) and 20802058 (18:00:46Z)
+  (defconst SIG1 "0d745db068db9e16379a49f65d76353d721d79fb459d20b33a50e750e5cdb10400af36e03d4a8414b3a86770d1d1e90e85462dce40b3cf5c27f9fdb477b6f6e0")
+  (defconst SIG2 "19d1a6c9bf554b87d004b73acccad64cc0b4370735b609369f92a9a53e8a07870651464a0b393ef8c607ff05eab5dd7b870ff5dfafda7140e0e2ed10387d3160")
+  ;; and 20802059, three seconds later
+  (defconst SIG3 "090610f4d8155e4d56b23988d4f0a0451e42a3cc2c296cf4bc98f5f3bbfed1a811d2467d48083eabef7f856e0e9198166abc9a67de356bee250adf30d4a3c5c7")
+  ;; how many times `card` appears in a list of cards
+  (defun tally:integer (card:string cards:[string])
+    (length (filter (lambda (c:string) (= c card)) cards)))
+  ;; the pool the module SHOULD hold after dealing `hands` from `before`
+  (defun expected:[integer] (before:[integer] hands:[string])
+    (map (lambda (i:integer) (- (at i before) (tally (at i n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.KINDS) hands)))
+         (enumerate 0 51)))
+  ;; the kinds whose count moved, for the message
+  (defun moved:[integer] (a:[integer] b:[integer])
+    (filter (lambda (i:integer) (!= (at i a) (at i b))) (enumerate 0 51)))
+  (defun check:string (label:string before:[integer] seq:integer)
+    (let* ((r (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round seq))
+           (hands (+ (at 'punto r) (at 'banco r)))
+           (want (expected before hands))
+           (s (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status))
+           (got (at 'counts s)))
+      (enforce (= want got) (format "{}: the pool differs from the hands on kinds {}" [label (moved want got)]))
+      (enforce (= (fold (+) 0 got) (at 'remaining s)) (format "{}: counts do not sum to remaining" [label]))
+      (enforce (= (length hands) (- (fold (+) 0 before) (at 'remaining s)))
+        (format "{}: remaining did not fall by the cards dealt" [label]))
+      (format "{} ok: {} cards dealt, pool agrees on all 52 kinds" [label (length hands)])))
+  ;; the same recompute, answering with a reason instead of aborting -- for the control
+  (defun check-or-why:string (label:string before:[integer] seq:integer)
+    (let* ((r (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round seq))
+           (hands (+ (at 'punto r) (at 'banco r)))
+           (want (expected before hands))
+           (got (at 'counts (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status))))
+      (if (= want got) (format "{} ok" [label])
+          (format "DIFFERS on kinds {}" [(moved want got)])))))
+(commit-tx)
+
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.initialize n_48867b242317a0216a67f8c7ca26696b5878e0e3.spt-stub.FUNDING-ACCOUNT 30000.0)
+(commit-tx)
+(env-sigs [{"key":"h0u5e00000000000000000000000000000000000000000000000000000000004"
+           ,"caps":[(coin.TRANSFER "house-funder" (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 15000.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.fund-house "house-funder" 15000.0)
+(commit-tx)
+(env-sigs [])
+
+;; SK-0 the control: the recompute can fail. Against a pool that is NOT the module's,
+;; the check must refuse -- otherwise every row below proves nothing.
+(begin-tx)
+(expect "SK-0 a fresh pool is 8 of each kind" (make-list 52 8)
+  (at 'counts (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status)))
+(expect "SK-0a CONTROL the recompute of a coup that dealt AS twice differs from the fresh pool on kind 0" [0]
+  (shoe-oracle.moved (shoe-oracle.expected (make-list 52 8) ["AS" "AS"]) (make-list 52 8)))
+(commit-tx)
+
+;; round 1: two boards, dealt from the fresh shoe
+(env-chain-data { "block-time": (time "2026-09-20T17:42:13Z") })
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER shoe-oracle.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 100.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet shoe-oracle.ALICE { "punto": 100.0, "banco": 0.0, "tie": 0.0, "commission": 0.05 })
+(commit-tx)
+(env-sigs [])
+(env-chain-data { "block-time": (time "2026-09-20T17:47:00Z") })
+(begin-tx)
+(let ((before (at 'counts (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status))))
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.resolve 1 shoe-oracle.SIG1)
+  (expect "SK-1 after coup 1 the pool is the fresh pool minus exactly the five cards on the round"
+    "coup 1 ok: 5 cards dealt, pool agrees on all 52 kinds" (shoe-oracle.check "coup 1" before 1)))
+(expect "SK-1a the five dealt kinds each read 7" [7 7 7 7 7]
+  (map (lambda (c:string) (at (at c { "3H": 9, "4C": 15, "QC": 47, "10C": 39, "3S": 8 })
+                              (at 'counts (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status))))
+       ["3H" "4C" "QC" "10C" "3S"]))
+(commit-tx)
+
+;; round 2: dealt from the depleted shoe (cut 52, no refill), pinned to 20802058
+(env-chain-data { "block-time": (time "2026-09-20T17:56:46Z") })
+(env-sigs [{"key":"b0b0000000000000000000000000000000000000000000000000000000000002"
+           ,"caps":[(coin.TRANSFER shoe-oracle.BOB (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 10.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet shoe-oracle.BOB { "punto": 0.0, "banco": 10.0, "tie": 0.0, "commission": 0.05 })
+(commit-tx)
+(env-sigs [])
+(env-chain-data { "block-time": (time "2026-09-20T18:01:00Z") })
+(begin-tx)
+(let ((before (at 'counts (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status))))
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.resolve 2 shoe-oracle.SIG2)
+  (expect "SK-2 after coup 2 the pool is the previous pool minus exactly the cards on round 2" true
+    (contains "pool agrees on all 52 kinds" (shoe-oracle.check "coup 2" before 2))))
+(expect "SK-2a no refill happened: still shoe 1" 1
+  (at 'shoe-no (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status)))
+(commit-tx)
+
+;; round 3: opened with the cut set to EXACTLY the pool's count, so it REFILLS
+;; before dealing -- the refill fires AT the cut, not only under it (the oracle's
+;; SH-5 covers "under"). The recompute must then run from a fresh pool, and
+;; shoe-no must advance.
+(env-sigs [{"key":"476f5e8a97ad059ab4a585666252db4cc65404f0dbec9db72257d99fe276ebef","caps":[]}])
+(begin-tx)
+(let ((rem (at 'remaining (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status))))
+  (expect "SK-3n PRECONDITION two coups have left the pool short of a full shoe" true (< rem 416))
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.set-params 0.02 0.01 30000.0 120.0 120.0 0.05 rem)
+  (expect "SK-3n1 the cut dial now equals the pool's count" rem (at 'cut-card (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-params))))
+(commit-tx)
+(env-sigs [])
+;; pinned to 20802059: 3 s after 20802058, so the bet is placed 3 s later than round 2's
+(env-chain-data { "block-time": (time "2026-09-20T17:56:49Z") })
+(env-sigs [{"key":"a11ce00000000000000000000000000000000000000000000000000000000001"
+           ,"caps":[(coin.TRANSFER shoe-oracle.ALICE (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.house-account) 1.0)]}])
+(begin-tx)
+(n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.bet shoe-oracle.ALICE { "punto": 0.0, "banco": 0.0, "tie": 1.0, "commission": 0.05 })
+(expect "SK-3p round 3 opened with the cut AT the pool's count" (at 'remaining (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status))
+  (at 'cut-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 3)))
+(expect "SK-3p1 and pins the next beacon" 20802059
+  (at 'drand-round (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 3)))
+(commit-tx)
+(env-sigs [])
+(env-chain-data { "block-time": (time "2026-09-20T18:01:00Z") })
+(begin-tx)
+(let ((before (at 'counts (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status))))
+  (expect "SK-3q the pool stood EXACTLY at the round's cut before the deal: the boundary case"
+    (at 'cut-at-open (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.get-round 3)) (fold (+) 0 before))
+  (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.resolve 3 shoe-oracle.SIG3)
+  ;; the refill precedes the deal, so the recompute starts from a FRESH pool
+  (expect "SK-3 after a refill the pool is the fresh pool minus exactly the cards on round 3" true
+    (contains "pool agrees on all 52 kinds" (shoe-oracle.check "coup 3" (make-list 52 8) 3)))
+  (expect "SK-3a CONTROL recomputed from the depleted pool instead, the check refuses" true
+    (!= (take 12 (shoe-oracle.check-or-why "coup 3 from the old pool" before 3)) "coup 3 from")))
+(expect "SK-3b the shoe advanced" 2 (at 'shoe-no (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status)))
+(expect "SK-3c dealt-since restarted" 1 (at 'dealt-since (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status)))
+(expect "SK-3d shoe-seq is 3" 3 (at 'shoe-seq (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.shoe-status)))
+(commit-tx)
+
+(print "shoe oracle: the pool agreed with the dealt hands on every kind, across a refill")

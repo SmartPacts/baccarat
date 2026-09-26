@@ -1,0 +1,15 @@
+;; baccarat-open-round-must-fail.repl — INVERTED CONTROL: this file must FAIL to run.
+;;
+;; Until 2026-09-24, before deployment, the module had a separate `open-round` export,
+;; gated by an argument-free true-bodied token (since removed). Pact has no `private`,
+;; so every export is a door somebody else might find a way to open. The opener is now
+;; inlined in `bet`, so the module DEFINES NO SUCH EXPORT and a module that names it
+;; cannot even load. The gate runs this file and requires exit 1 with the engine's
+;; "has no such member: open-round". If the export ever comes back, this file loads
+;; clean, the gate turns RED, and the reachable surface is caught before a freeze.
+(load "baccarat-test-init.repl")
+(begin-tx)
+(module reach RG (defcap RG () (enforce true "ok"))
+  (defun open:integer () (n_48867b242317a0216a67f8c7ca26696b5878e0e3.baccarat.open-round)))
+(commit-tx)
+(print "UNEXPECTED: a module naming open-round loaded -- the export is back")
