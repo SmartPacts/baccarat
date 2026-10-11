@@ -118,6 +118,16 @@ worst case across the three outcomes. It can refuse a bet; it cannot run short o
 
 ## What you should know before you play
 
+**Who may play.** You must be at least 18 years old, or older where the law where you are sets
+a higher age for games of chance, and playing a game of chance for KDA must be lawful where you
+are. The play page asks you to confirm this by ticking a box, and it asks your wallet to sign
+nothing until that box is ticked. That tick is the only check there is. The contract cannot
+know your age or where you are: it accepts a board from any account, and anyone can call it
+directly without the page. Whether you may play is yours to know, not something we can verify
+for you, and we keep no list of countries. **If you are under age, or play is unlawful where
+you are, do not play.** Play for entertainment, with money you can afford to lose; if play
+stops being fun, stop.
+
 **You do not need any KDA to be paid.** The house runs a helper that sends every winner's
 collection for them — and every refund — usually within minutes of the result. You sign nothing
 and you need hold nothing: a collection always pays the account that placed the board, never
